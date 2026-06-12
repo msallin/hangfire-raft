@@ -20,11 +20,15 @@ jobs:
   pack-publish:
     name: Pack & Publish
     runs-on: ubuntu-latest
+    # Mapped here so the publish step can gate on it: GitHub does not allow the `secrets` context
+    # directly in an `if:` condition, but a job-level env derived from it is allowed.
+    env:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: |
             8.0.x
@@ -60,7 +64,7 @@ jobs:
           -o ${{ github.workspace }}/artifacts
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nuget-package
           path: |
@@ -73,9 +77,9 @@ jobs:
       # Actions, then push a v*.*.* tag. Prefer NuGet Trusted Publishing (OIDC) over a long-lived
       # key when you are ready: https://learn.microsoft.com/nuget/nuget-org/trusted-publishing
       - name: Publish to NuGet
-        if: ${{ secrets.NUGET_API_KEY != '' }}
+        if: ${{ env.NUGET_API_KEY != '' }}
         run: >
           dotnet nuget push "${{ github.workspace }}/artifacts/*.nupkg"
-          --api-key "${{ secrets.NUGET_API_KEY }}"
+          --api-key "$NUGET_API_KEY"
           --source https://api.nuget.org/v3/index.json
           --skip-duplicate
