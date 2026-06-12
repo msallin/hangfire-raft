@@ -129,16 +129,30 @@ cluster on a private subnet, VPC, or overlay network, and never expose these por
 clients. Undecodable forwarded commands are rejected before they enter the log, but that is a
 robustness guard, not an authentication boundary.
 
+## Kubernetes
+
+Run the cluster as a StatefulSet behind a headless Service with a per-pod PersistentVolume for the
+WAL. See [docs/kubernetes.md](docs/kubernetes.md) for the full guide and caveats (the main one: pod
+IP changes on reschedule, because members are resolved to IPs once at startup). Ready-to-use pieces:
+
+- [`deploy/kubernetes/hangfire-raft.yaml`](deploy/kubernetes/hangfire-raft.yaml) — Service,
+  StatefulSet and PodDisruptionBudget for a 3-node cluster.
+- [`samples/Hangfire.Raft.K8sSample`](samples/Hangfire.Raft.K8sSample) — a Hangfire server +
+  dashboard host that derives its identity from the pod environment, with a Dockerfile.
+
 ## Project layout
 
 ```
-src/Hangfire.Raft           the storage implementation
-  Commands/                 replicated op set + binary wire format
-  State/                    deterministic in-memory store + snapshot format
-  Cluster/                  DotNext state machine, Raft host, leader forwarding
-  Monitoring/               dashboard read API
-tests/Hangfire.Raft.Tests   unit tests (store, serializer) + cluster integration tests
-samples/Hangfire.Raft.Sample  runnable demo (single node or 3-node localhost cluster)
+src/Hangfire.Raft             the storage implementation
+  Commands/                   replicated op set + binary wire format
+  State/                      deterministic in-memory store + snapshot format
+  Cluster/                    DotNext state machine, Raft host, leader forwarding
+  Monitoring/                 dashboard read API
+tests/Hangfire.Raft.Tests     unit tests (store, serializer) + cluster integration tests
+samples/Hangfire.Raft.Sample      runnable console demo (single node or 3-node localhost cluster)
+samples/Hangfire.Raft.K8sSample   Kubernetes-ready ASP.NET host (Hangfire server + dashboard)
+deploy/kubernetes             example manifests
+docs/kubernetes.md            Kubernetes deployment guide
 ```
 
 `dotnet test` runs everything, including tests that boot real single- and three-node clusters

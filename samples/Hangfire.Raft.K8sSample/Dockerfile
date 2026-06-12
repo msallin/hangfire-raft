@@ -1,0 +1,24 @@
+# Build from the repository ROOT so the build context can see both the library and the sample:
+#   docker build -f samples/Hangfire.Raft.K8sSample/Dockerfile -t hangfire-raft-sample .
+#
+# The projects target net8.0, so the 8.0 SDK builds them and the 8.0 ASP.NET runtime runs them.
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+# Restore against just the project files first for better layer caching.
+COPY src/Hangfire.Raft/Hangfire.Raft.csproj src/Hangfire.Raft/
+COPY samples/Hangfire.Raft.K8sSample/Hangfire.Raft.K8sSample.csproj samples/Hangfire.Raft.K8sSample/
+RUN dotnet restore samples/Hangfire.Raft.K8sSample/Hangfire.Raft.K8sSample.csproj
+
+COPY src/Hangfire.Raft/ src/Hangfire.Raft/
+COPY samples/Hangfire.Raft.K8sSample/ samples/Hangfire.Raft.K8sSample/
+RUN dotnet publish samples/Hangfire.Raft.K8sSample/Hangfire.Raft.K8sSample.csproj -c Release --no-restore -o /app
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+WORKDIR /app
+COPY --from=build /app .
+
+# 5000 Raft consensus, 5001 leader-forwarding (Raft + RpcPortOffset), 8080 HTTP (dashboard + health).
+EXPOSE 5000 5001 8080
+
+ENTRYPOINT ["dotnet", "Hangfire.Raft.K8sSample.dll"]

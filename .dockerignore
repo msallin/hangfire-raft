@@ -1,0 +1,14 @@
+# Keep the Docker build context small and reproducible.
+**/bin/
+**/obj/
+.git/
+.github/
+.vs/
+.vscode/
+.idea/
+artifacts/
+TestResults/
+wal/
+hangfire-raft/
+**/*.user
+**/*.nupkg

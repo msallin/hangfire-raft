@@ -1,0 +1,134 @@
+# A 3-node Hangfire.Raft cluster on Kubernetes.
+#
+#   kubectl apply -f deploy/kubernetes/hangfire-raft.yaml
+#
+# Before applying: build and push the sample image (see samples/Hangfire.Raft.K8sSample/Dockerfile)
+# and set `image:` below. Replicas, RAFT_REPLICAS, and PodDisruptionBudget.minAvailable must stay
+# consistent (odd replica count; minAvailable = quorum). See docs/kubernetes.md.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jobs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hangfire
+  namespace: jobs
+spec:
+  clusterIP: None                 # headless: gives each pod a stable DNS name (hangfire-0.hangfire.jobs.svc...)
+  publishNotReadyAddresses: true  # REQUIRED: pods must resolve each other during Raft bootstrap, before they are Ready
+  selector:
+    app: hangfire
+  ports:
+    - name: raft
+      port: 5000
+    - name: raft-rpc
+      port: 5001                  # leader-forwarding channel = Raft port + RpcPortOffset (default 1)
+---
+# Optional: exposes the dashboard/HTTP inside the cluster. Front it with an Ingress, or reach it with
+# `kubectl -n jobs port-forward svc/hangfire-dashboard 8080:8080` and open http://localhost:8080/dashboard.
+apiVersion: v1
+kind: Service
+metadata:
+  name: hangfire-dashboard
+  namespace: jobs
+spec:
+  selector:
+    app: hangfire
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hangfire
+  namespace: jobs
+spec:
+  serviceName: hangfire
+  replicas: 3                     # odd number for quorum; 3 tolerates one node down
+  podManagementPolicy: Parallel   # all nodes start together so they can hold an election at boot
+  selector:
+    matchLabels:
+      app: hangfire
+  template:
+    metadata:
+      labels:
+        app: hangfire
+    spec:
+      affinity:
+        podAntiAffinity:          # spread replicas across nodes so one node failure does not cost quorum
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: hangfire
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: app
+          image: ghcr.io/msallin/hangfire-raft-sample:latest  # <-- replace with your image
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RAFT_SERVICE
+              value: hangfire
+            - name: RAFT_REPLICAS
+              value: "3"          # must equal spec.replicas
+            - name: RAFT_WAL_PATH
+              value: /data/wal
+          ports:
+            - name: raft
+              containerPort: 5000
+            - name: raft-rpc
+              containerPort: 5001
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: wal
+              mountPath: /data/wal
+          livenessProbe:
+            tcpSocket:
+              port: 5000          # the Raft listener is up once the node has started
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: wal                 # one persistent volume per pod for the write-ahead log + snapshots
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 1Gi
+        # storageClassName: <your-storage-class>
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hangfire
+  namespace: jobs
+spec:
+  minAvailable: 2                 # never voluntarily drop below quorum (for replicas: 3)
+  selector:
+    matchLabels:
+      app: hangfire
