@@ -1,0 +1,140 @@
+# Local single-node minikube variant of deploy/kubernetes/hangfire-raft.yaml.
+#
+# Differences from the production manifest:
+#   - image: a locally built tag (hangfire-raft-sample:local) with imagePullPolicy: IfNotPresent,
+#     so it uses the image loaded into minikube instead of pulling from a registry.
+#   - soft (preferred) pod anti-affinity instead of required, so all three Raft nodes fit on the one
+#     minikube node. NOTE: co-locating the replicas means this is NOT a real fault-tolerance test —
+#     it exercises bootstrap, DNS, per-pod WAL, election, and forwarding, but a single node failure
+#     takes the whole cluster. For real spreading use `minikube start --nodes 3` with the production
+#     manifest, or a real cluster.
+#   - smaller resource requests.
+#   - no PodDisruptionBudget (see the note at the bottom of this file).
+#
+# Build + load the image, then apply:
+#   docker build -f samples/Hangfire.Raft.K8sSample/Dockerfile -t hangfire-raft-sample:local .
+#   minikube image load hangfire-raft-sample:local
+#   kubectl apply -f deploy/kubernetes/minikube.yaml
+#
+# Expect one or two pod restarts on first boot: during parallel bootstrap a pod can start before its
+# peers have published DNS records, crash on the failed lookup, and recover on the restart.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jobs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hangfire
+  namespace: jobs
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: hangfire
+  ports:
+    - name: raft
+      port: 5000
+    - name: raft-rpc
+      port: 5001
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hangfire-dashboard
+  namespace: jobs
+spec:
+  selector:
+    app: hangfire
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hangfire
+  namespace: jobs
+spec:
+  serviceName: hangfire
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: hangfire
+  template:
+    metadata:
+      labels:
+        app: hangfire
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:  # soft: prefer spreading, but allow co-location on one node
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: hangfire
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: app
+          image: hangfire-raft-sample:local
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RAFT_SERVICE
+              value: hangfire
+            - name: RAFT_REPLICAS
+              value: "3"
+            - name: RAFT_WAL_PATH
+              value: /data/wal
+          ports:
+            - name: raft
+              containerPort: 5000
+            - name: raft-rpc
+              containerPort: 5001
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: wal
+              mountPath: /data/wal
+          livenessProbe:
+            tcpSocket:
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: wal
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 1Gi
+# No PodDisruptionBudget here on purpose: on a single-node cluster a "minAvailable: 2" budget cannot
+# protect against the one node failing (all three replicas share it) and would only block a
+# `kubectl drain` of that node. The production manifest (hangfire-raft.yaml) keeps the PDB, where it
+# is meaningful across multiple nodes.

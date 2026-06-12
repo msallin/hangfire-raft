@@ -12,6 +12,8 @@ This directory ships a working example:
 - [`samples/Hangfire.Raft.K8sSample/Dockerfile`](../samples/Hangfire.Raft.K8sSample/Dockerfile) — image build.
 - [`deploy/kubernetes/hangfire-raft.yaml`](../deploy/kubernetes/hangfire-raft.yaml) — Namespace,
   headless Service, StatefulSet, dashboard Service and PodDisruptionBudget.
+- [`deploy/kubernetes/minikube.yaml`](../deploy/kubernetes/minikube.yaml) — a single-node variant for
+  local testing on minikube (see "Local testing with minikube" below).
 
 ## How the library maps onto Kubernetes
 
@@ -41,6 +43,34 @@ kubectl -n jobs get pods -w
 kubectl -n jobs port-forward svc/hangfire-dashboard 8080:8080
 #   then browse http://localhost:8080/dashboard
 ```
+
+## Local testing with minikube
+
+[`deploy/kubernetes/minikube.yaml`](../deploy/kubernetes/minikube.yaml) is a single-node variant: it
+uses a locally built image (`imagePullPolicy: IfNotPresent`) and **soft** anti-affinity so all three
+Raft nodes fit on one minikube node. Co-locating the replicas is not a real fault-tolerance test — a
+single node failure takes the whole cluster — but it exercises bootstrap, DNS, per-pod WAL, election,
+leader forwarding and job processing.
+
+```bash
+# Build the image and load it into minikube (host Docker required).
+docker build -f samples/Hangfire.Raft.K8sSample/Dockerfile -t hangfire-raft-sample:local .
+minikube image load hangfire-raft-sample:local
+
+kubectl apply -f deploy/kubernetes/minikube.yaml
+kubectl -n jobs rollout status statefulset/hangfire
+
+# Confirm jobs are processing (the sample runs a per-minute "heartbeat" job).
+kubectl -n jobs logs hangfire-0 | grep heartbeat
+
+# Dashboard: port-forward, then browse http://localhost:8080/dashboard
+kubectl -n jobs port-forward svc/hangfire-dashboard 8080:8080
+```
+
+Expect one or two pod restarts on the first apply (see "Pods may restart once at first boot" below);
+the cluster stabilizes after them. For real node spreading, use `minikube start --nodes 3` with the
+production manifest instead. Tear down with `kubectl delete -f deploy/kubernetes/minikube.yaml` (the
+per-pod PVCs persist; remove them with `kubectl -n jobs delete pvc -l app=hangfire`).
 
 ## How a pod finds its identity
 
@@ -79,6 +109,15 @@ library validates at startup.
   PodDisruptionBudget and anti-affinity make reschedules rare and one-at-a-time; for low-churn
   clusters and dev/test this is fine, but it is not self-healing. The proper fix is a library change
   to re-resolve member DNS on reconnect instead of pinning at startup.
+
+- **Pods may restart once at first boot.** Member resolution happens once at startup and throws if a
+  peer's DNS name is not resolvable yet. During parallel bootstrap a pod can finish starting before
+  its peers have published DNS records, crash on the failed lookup, and be restarted by Kubernetes;
+  it succeeds on the next attempt once the records exist. A fresh cluster typically shows one or two
+  pods with `RESTARTS 1` that then stay stable. `publishNotReadyAddresses` shrinks this window but
+  does not close it, and because the crash is an unhandled exception (the process exits) no probe
+  tuning prevents it — the real fix is the same as above: retry/re-resolve member DNS instead of
+  resolving once and throwing.
 
 - **Scaling is a deliberate config change, not `kubectl scale`.** Membership is static and lives in
   each pod's `Members` list (driven by `RAFT_REPLICAS`). To change the cluster size, update both
