@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>Hangfire.Raft</RootNamespace>
+    <Description>Hangfire job storage backed by a DotNext Raft cluster. State is replicated in-memory across nodes with a write-ahead log on disk; no external database required.</Description>
+    <PackageTags>hangfire;storage;raft;cluster;dotnext</PackageTags>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Hangfire.Core" Version="1.8.*" />
+    <PackageReference Include="DotNext.Net.Cluster" Version="5.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Hangfire.Raft.Tests" />
+  </ItemGroup>
+
+</Project>
