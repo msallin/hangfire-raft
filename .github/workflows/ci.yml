@@ -13,14 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # The projects target net8.0 (so the 8.0 runtime is needed to run the tests), but the solution
-      # uses the .slnx format, which the 10.0 SDK builds. Installing both covers both needs.
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: |
-            8.0.x
-            10.0.x
+          dotnet-version: 10.0.x
 
       - name: Restore
         run: dotnet restore Hangfire.Raft.slnx
