@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The projects target net8.0 (so the 8.0 runtime is needed to run the tests), but the solution
+      # uses the .slnx format, which the 10.0 SDK builds. Installing both covers both needs.
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore Hangfire.Raft.slnx
+
+      - name: Build
+        run: dotnet build Hangfire.Raft.slnx -c Release --no-restore
+
+      - name: Test
+        run: >
+          dotnet test Hangfire.Raft.slnx -c Release --no-build
+          --logger "trx;LogFileName=test-results.trx"
+          --results-directory ${{ github.workspace }}/TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ${{ github.workspace }}/TestResults/*.trx
+          if-no-files-found: ignore

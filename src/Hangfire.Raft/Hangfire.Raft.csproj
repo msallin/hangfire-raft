@@ -7,9 +7,24 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RootNamespace>Hangfire.Raft</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!-- NuGet package metadata. Version defaults to 0.1.0 for local packs; CI overrides it from the release tag. -->
+  <PropertyGroup>
+    <PackageId>Hangfire.Raft</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Marc Sallin</Authors>
     <Description>Hangfire job storage backed by a DotNext Raft cluster. State is replicated in-memory across nodes with a write-ahead log on disk; no external database required.</Description>
     <PackageTags>hangfire;storage;raft;cluster;dotnext</PackageTags>
-    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/msallin/hangfire-raft</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/msallin/hangfire-raft.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <Copyright>Copyright (c) 2026 Marc Sallin</Copyright>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,6 +34,10 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Hangfire.Raft.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>

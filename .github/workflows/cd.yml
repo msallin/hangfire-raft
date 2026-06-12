@@ -1,0 +1,81 @@
+name: CD
+
+# Builds, tests and packs the NuGet package on a version tag (v1.2.3) or manual run.
+# Publishing to NuGet is wired up but DORMANT: the publish step runs only once a NUGET_API_KEY
+# secret exists, so adding this workflow does not push anything yet (see the step comment below).
+
+on:
+  push:
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version, e.g. 1.2.3. Defaults to a dev version when omitted.'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  pack-publish:
+    name: Pack & Publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="0.0.0-dev.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved package version: ${VERSION}"
+
+      - name: Restore
+        run: dotnet restore Hangfire.Raft.slnx
+
+      - name: Build
+        run: dotnet build Hangfire.Raft.slnx -c Release --no-restore -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Test
+        run: dotnet test Hangfire.Raft.slnx -c Release --no-build
+
+      - name: Pack
+        run: >
+          dotnet pack src/Hangfire.Raft/Hangfire.Raft.csproj -c Release --no-build
+          -p:Version=${{ steps.version.outputs.version }}
+          -o ${{ github.workspace }}/artifacts
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: |
+            ${{ github.workspace }}/artifacts/*.nupkg
+            ${{ github.workspace }}/artifacts/*.snupkg
+
+      # --- NuGet publishing: bootstrapped but intentionally dormant. ---
+      # This step is skipped until a NUGET_API_KEY secret is configured, so merging this workflow
+      # publishes nothing. To go live: add the secret under Settings -> Secrets and variables ->
+      # Actions, then push a v*.*.* tag. Prefer NuGet Trusted Publishing (OIDC) over a long-lived
+      # key when you are ready: https://learn.microsoft.com/nuget/nuget-org/trusted-publishing
+      - name: Publish to NuGet
+        if: ${{ secrets.NUGET_API_KEY != '' }}
+        run: >
+          dotnet nuget push "${{ github.workspace }}/artifacts/*.nupkg"
+          --api-key "${{ secrets.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
