@@ -190,11 +190,14 @@ internal sealed class ForwardingServer : IAsyncDisposable
 
 internal sealed class ForwardingClient : IDisposable
 {
-    private readonly ConcurrentDictionary<IPEndPoint, ConcurrentBag<TcpClient>> _pool = new();
+    // Keyed by EndPoint so a DnsEndPoint and an IPEndPoint pool independently. Connecting by a
+    // DnsEndPoint re-resolves it each time, so a pooled connection to a rescheduled peer's old IP
+    // is dropped on first failure and the next attempt reaches the new IP.
+    private readonly ConcurrentDictionary<EndPoint, ConcurrentBag<TcpClient>> _pool = new();
     private volatile bool _disposed;
 
     /// <summary>Sends a command to the given node and waits for the commit acknowledgement.</summary>
-    public async Task SubmitAsync(IPEndPoint endpoint, ReadOnlyMemory<byte> payload, CancellationToken token)
+    public async Task SubmitAsync(EndPoint endpoint, ReadOnlyMemory<byte> payload, CancellationToken token)
     {
         TcpClient? client = null;
         var requestFullyWritten = false;
@@ -252,7 +255,7 @@ internal sealed class ForwardingClient : IDisposable
         }
     }
 
-    private async Task<TcpClient> RentAsync(IPEndPoint endpoint, CancellationToken token)
+    private async Task<TcpClient> RentAsync(EndPoint endpoint, CancellationToken token)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_pool.TryGetValue(endpoint, out var bag))
@@ -268,7 +271,12 @@ internal sealed class ForwardingClient : IDisposable
         try
         {
             client.NoDelay = true;
-            await client.ConnectAsync(endpoint, token).ConfigureAwait(false);
+            // Connecting a DnsEndPoint by host name re-resolves it (so a peer's new IP is picked up);
+            // an IPEndPoint connects directly.
+            if (endpoint is DnsEndPoint dns)
+                await client.ConnectAsync(dns.Host, dns.Port, token).ConfigureAwait(false);
+            else
+                await client.ConnectAsync((IPEndPoint)endpoint, token).ConfigureAwait(false);
             return client;
         }
         catch
@@ -295,7 +303,7 @@ internal sealed class ForwardingClient : IDisposable
         }
     }
 
-    private void Return(IPEndPoint endpoint, TcpClient client)
+    private void Return(EndPoint endpoint, TcpClient client)
     {
         _pool.GetOrAdd(endpoint, static _ => []).Add(client);
 

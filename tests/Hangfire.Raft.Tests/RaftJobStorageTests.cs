@@ -393,6 +393,44 @@ public class RaftJobStorageTests : IDisposable
     }
 
     [Fact]
+    public async Task GetHealth_ReportsLeadership_OnASingleNode()
+    {
+        var storage = await StartSingleNode();
+        await PollUntil(() => storage.GetHealth().HasLeader, "the node elects itself leader");
+
+        var health = storage.GetHealth();
+        Assert.True(health.HasLeader);
+        Assert.True(health.IsLeader);
+        Assert.NotNull(health.LeaderEndpoint);
+        Assert.True(health.Term > 0);
+        Assert.True(health.MemberCount >= 1);
+    }
+
+    [Fact]
+    public async Task StartAsync_DoesNotThrow_WhenAPeerHostnameIsUnresolvable()
+    {
+        // The old code resolved every member's DNS eagerly and threw on a miss, crashing startup.
+        // Now members are DnsEndPoints resolved lazily by the transport, so an unresolvable peer is
+        // tolerated: the node starts, cannot reach the bogus member, and simply has no quorum.
+        var port = AllocatePortPairs(1)[0];
+        var options = new RaftStorageOptions
+        {
+            SelfEndpoint = $"127.0.0.1:{port}",
+            WalPath = Path.Combine(_walRoot, $"unresolvable-{port}"),
+            LowerElectionTimeoutMs = 150,
+            UpperElectionTimeoutMs = 300,
+            SubmitTimeout = TimeSpan.FromSeconds(2),
+        };
+        options.Members.Add($"127.0.0.1:{port}");
+        options.Members.Add("does-not-exist.invalid:6000");
+
+        var storage = await RaftJobStorage.StartAsync(options); // must not throw
+        _storages.Add(storage);
+
+        Assert.False(storage.GetHealth().HasLeader); // 1 of 2 reachable -> no quorum, but no crash
+    }
+
+    [Fact]
     public async Task Compaction_SnapshotsTheLog_AndStateSurvivesRestart()
     {
         var ports = AllocatePortPairs(2);

@@ -67,10 +67,9 @@ kubectl -n jobs logs hangfire-0 | grep heartbeat
 kubectl -n jobs port-forward svc/hangfire-dashboard 8080:8080
 ```
 
-Expect one or two pod restarts on the first apply (see "Pods may restart once at first boot" below);
-the cluster stabilizes after them. For real node spreading, use `minikube start --nodes 3` with the
-production manifest instead. Tear down with `kubectl delete -f deploy/kubernetes/minikube.yaml` (the
-per-pod PVCs persist; remove them with `kubectl -n jobs delete pvc -l app=hangfire`).
+For real node spreading, use `minikube start --nodes 3` with the production manifest instead. Tear
+down with `kubectl delete -f deploy/kubernetes/minikube.yaml` (the per-pod PVCs persist; remove them
+with `kubectl -n jobs delete pvc -l app=hangfire`).
 
 ## How a pod finds its identity
 
@@ -82,8 +81,9 @@ SelfEndpoint = {POD_NAME}.{RAFT_SERVICE}.{POD_NAMESPACE}.svc.cluster.local:5000
 Members      = {RAFT_SERVICE}-{0..RAFT_REPLICAS-1}.{RAFT_SERVICE}.{POD_NAMESPACE}.svc.cluster.local:5000
 ```
 
-`SelfEndpoint` resolves to the pod's own IP and matches exactly one `Members` entry, which is what the
-library validates at startup.
+`SelfEndpoint` matches exactly one `Members` entry (compared by host name, with no DNS lookup), which
+the library validates at startup. Host names are kept as `DnsEndPoint`s that the Raft transport
+resolves lazily and re-resolves on every reconnect.
 
 ## Load-bearing settings (do not drop these)
 
@@ -97,36 +97,33 @@ library validates at startup.
 - **`podAntiAffinity`** so replicas land on different nodes; otherwise one node failure can take out
   the quorum.
 
+## Resilience (handled automatically)
+
+- **Rescheduled pods rejoin on their own.** Host names in `SelfEndpoint`/`Members` are kept as
+  `DnsEndPoint`s rather than resolved to fixed IPs, and both the Raft transport and the
+  command-forwarding channel re-resolve them on every reconnection. When a pod reschedules — same
+  StatefulSet name, new IP — its peers reach it again at the new address on their next reconnect,
+  with no rolling restart, and member identity (derived from the host name) is unchanged. The only
+  delay is your cluster DNS TTL (CoreDNS serves the updated record within seconds), so a 3-node
+  cluster's fault tolerance returns by itself shortly after a reschedule.
+
+- **Bootstrap tolerates not-yet-resolvable peers.** Members are resolved lazily, so a pod that starts
+  before its peers have DNS records does not crash; the transport logs the unreachable member and
+  retries, and the cluster converges once the records appear. (Keep `publishNotReadyAddresses: true`
+  so those records are published promptly — it is what lets the nodes find each other before any of
+  them is Ready.)
+
 ## Limitations and sharp edges
-
-- **Pod IP changes are the main caveat.** The library resolves each member's hostname to an IP once,
-  at startup, and hands those fixed IPs to the Raft transport. Kubernetes gives StatefulSet pods
-  stable *names* but not stable *IPs* — a pod that reschedules (node failure, rolling update,
-  eviction) keeps its name and gets a new IP. The surviving peers keep dialing the old IP, so the
-  rescheduled pod stays out of the cluster until **those peers** are themselves restarted. A 3-node
-  cluster keeps serving on the remaining two (quorum holds), but its fault tolerance is gone until you
-  rolling-restart (`kubectl -n jobs rollout restart statefulset/hangfire`) to re-resolve. The
-  PodDisruptionBudget and anti-affinity make reschedules rare and one-at-a-time; for low-churn
-  clusters and dev/test this is fine, but it is not self-healing. The proper fix is a library change
-  to re-resolve member DNS on reconnect instead of pinning at startup.
-
-- **Pods may restart once at first boot.** Member resolution happens once at startup and throws if a
-  peer's DNS name is not resolvable yet. During parallel bootstrap a pod can finish starting before
-  its peers have published DNS records, crash on the failed lookup, and be restarted by Kubernetes;
-  it succeeds on the next attempt once the records exist. A fresh cluster typically shows one or two
-  pods with `RESTARTS 1` that then stay stable. `publishNotReadyAddresses` shrinks this window but
-  does not close it, and because the crash is an unhandled exception (the process exits) no probe
-  tuning prevents it — the real fix is the same as above: retry/re-resolve member DNS instead of
-  resolving once and throwing.
 
 - **Scaling is a deliberate config change, not `kubectl scale`.** Membership is static and lives in
   each pod's `Members` list (driven by `RAFT_REPLICAS`). To change the cluster size, update both
   `replicas` and `RAFT_REPLICAS` (and `PodDisruptionBudget.minAvailable`) and roll the StatefulSet.
   Do not autoscale it.
 
-- **Readiness is shallow.** There is no built-in leader-aware health endpoint yet, so `/health`
-  returning 200 means "the host is up," not "the cluster has a leader." A readiness check that
-  reflects write-availability needs a small health surface in the library.
+- **Readiness reflects write-availability.** The sample's `/ready` endpoint (backed by
+  `RaftJobStorage.GetHealth()`) returns 200 only when the node knows a leader — so it can submit or
+  forward writes — and 503 otherwise; the `readinessProbe` points at it. Liveness is a separate TCP
+  check on the Raft port, and `/health` stays a plain "host is up" signal.
 
 - **Clocks.** Expirations compare the submitting node's UTC timestamp, so keep node clocks reasonably
   synchronized (kubelet nodes normally run NTP).

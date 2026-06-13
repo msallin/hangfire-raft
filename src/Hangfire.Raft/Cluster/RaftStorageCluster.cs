@@ -40,6 +40,20 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     /// <summary>True when this node currently believes itself to be the cluster leader.</summary>
     public bool IsLeader => _cluster.Leader is { IsRemote: false };
 
+    /// <summary>Point-in-time view of cluster health for readiness/liveness checks.</summary>
+    public RaftClusterHealth GetHealth()
+    {
+        var leader = _cluster.Leader;
+        return new RaftClusterHealth
+        {
+            HasLeader = leader is not null,
+            IsLeader = leader is { IsRemote: false },
+            LeaderEndpoint = leader?.EndPoint,
+            Term = _cluster.Term,
+            MemberCount = _cluster.Members.Count,
+        };
+    }
+
     private RaftStorageCluster(RaftStorageOptions options)
     {
         _options = options;
@@ -47,11 +61,17 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             ? factory.CreateLogger("Hangfire.Raft")
             : NullLogger.Instance;
 
-        var self = options.ResolvedSelf;
+        var self = options.Self;                                   // EndPoint: DnsEndPoint for host names, IPEndPoint for IP literals
+        var raftPort = RaftStorageOptions.PortOf(self);
+        var bindAddress = RaftStorageOptions.BindAddressFor(self);
         Directory.CreateDirectory(options.WalPath);
         _stateMachine = new HangfireStateMachine(options.WalPath, options.WalRecordsPerPartition, _logger);
 
-        var configuration = new RaftCluster.TcpConfiguration(self)
+        // Bind to a concrete IP, but advertise `self` (a DnsEndPoint when configured by host name) as
+        // the public endpoint. DotNext derives member identity from the public endpoint's host, not
+        // its resolved address, so identity is stable across IP changes, and it re-resolves the
+        // DnsEndPoint on each (re)connection.
+        var configuration = new RaftCluster.TcpConfiguration(new IPEndPoint(bindAddress, raftPort))
         {
             LowerElectionTimeout = options.LowerElectionTimeoutMs,
             UpperElectionTimeout = options.UpperElectionTimeoutMs,
@@ -62,13 +82,13 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
 
         var membership = configuration.UseInMemoryConfigurationStorage();
         var members = membership.CreateActiveConfigurationBuilder();
-        foreach (var member in options.ResolvedMembers) members.Add(member);
+        foreach (var member in options.ClusterMembers) members.Add(member);
         members.Build();
 
         _cluster = new RaftCluster(configuration) { AuditTrail = _stateMachine };
 
         _forwardingServer = new ForwardingServer(
-            RaftStorageOptions.RpcEndpoint(self, options.RpcPortOffset),
+            new IPEndPoint(bindAddress, raftPort + options.RpcPortOffset),
             HandleForwardedCommand,
             _logger);
     }
@@ -123,9 +143,9 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
 
                     if (leader.IsRemote)
                     {
-                        if (leader.EndPoint is not IPEndPoint leaderEndpoint)
-                            throw new RaftStorageException($"Unexpected leader endpoint type {leader.EndPoint}.");
-                        var rpcEndpoint = RaftStorageOptions.RpcEndpoint(leaderEndpoint, _options.RpcPortOffset);
+                        // Forward by the leader's own endpoint form (a DnsEndPoint re-resolves, so a
+                        // rescheduled leader is reached at its new IP without a restart).
+                        var rpcEndpoint = RaftStorageOptions.RpcEndpoint(leader.EndPoint, _options.RpcPortOffset);
                         await _forwardingClient.SubmitAsync(rpcEndpoint, payload, linked).ConfigureAwait(false);
                         break; // acknowledged as committed
                     }

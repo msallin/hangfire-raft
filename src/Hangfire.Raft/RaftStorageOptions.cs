@@ -58,25 +58,31 @@ public sealed class RaftStorageOptions
     /// <summary>Optional logger factory for cluster and storage diagnostics.</summary>
     public ILoggerFactory? LoggerFactory { get; set; }
 
-    internal IPEndPoint ResolvedSelf => ResolveEndpoint(SelfEndpoint);
+    internal EndPoint Self => ParseEndpoint(SelfEndpoint);
 
-    internal IReadOnlyList<IPEndPoint> ResolvedMembers
+    internal IReadOnlyList<EndPoint> ClusterMembers
     {
         get
         {
             if (Members.Count == 0) throw new InvalidOperationException("RaftStorageOptions.Members must contain at least one endpoint.");
-            var result = Members.Select(ResolveEndpoint).ToList();
-            if (!result.Contains(ResolvedSelf)) throw new InvalidOperationException($"RaftStorageOptions.Members must include SelfEndpoint ({SelfEndpoint}).");
+            var result = Members.Select(ParseEndpoint).ToList();
+            if (!result.Contains(Self)) throw new InvalidOperationException($"RaftStorageOptions.Members must include SelfEndpoint ({SelfEndpoint}).");
             return result;
         }
     }
 
     /// <summary>
-    /// Parses "host:port" into an IPEndPoint, resolving host names via DNS once at startup.
-    /// Input:  "127.0.0.1:3000"  -> 127.0.0.1:3000
-    /// Input:  "node1.local:3000" -> first resolved IPv4 address:3000
+    /// Parses "host:port" into an endpoint WITHOUT resolving DNS. An IP literal becomes an
+    /// <see cref="IPEndPoint"/>; a host name becomes a <see cref="DnsEndPoint"/>, which the Raft
+    /// transport re-resolves on every (re)connection. That is what lets a member whose IP changes
+    /// (for example a rescheduled Kubernetes pod that keeps its DNS name) be reached again without
+    /// restarting the rest of the cluster, and it also means startup does not fail when a peer's
+    /// name is not yet resolvable.
+    /// Input:  "127.0.0.1:3000"   -> IPEndPoint 127.0.0.1:3000
+    /// Input:  "[::1]:3000"        -> IPEndPoint ::1:3000   (IPv6 literals must be bracketed)
+    /// Input:  "node1.local:3000" -> DnsEndPoint node1.local:3000
     /// </summary>
-    internal static IPEndPoint ResolveEndpoint(string endpoint)
+    internal static EndPoint ParseEndpoint(string endpoint)
     {
         var idx = endpoint.LastIndexOf(':');
         if (idx <= 0 || idx == endpoint.Length - 1)
@@ -85,14 +91,38 @@ public sealed class RaftStorageOptions
         var host = endpoint[..idx];
         var port = int.Parse(endpoint[(idx + 1)..]);
 
-        if (IPAddress.TryParse(host, out var ip)) return new IPEndPoint(ip, port);
+        // An IPv6 literal must be bracketed so the colons in the address are not mistaken for the
+        // host:port separator; a bare IPv6 literal is rejected rather than silently misparsed.
+        if (host.StartsWith('[') && host.EndsWith(']'))
+            host = host[1..^1];
+        else if (host.Contains(':'))
+            throw new FormatException($"Endpoint '{endpoint}': an IPv6 literal must be bracketed, e.g. [::1]:{port}.");
 
-        var addresses = Dns.GetHostAddresses(host);
-        var address = addresses.FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-                      ?? addresses.FirstOrDefault()
-                      ?? throw new InvalidOperationException($"Cannot resolve host '{host}'.");
-        return new IPEndPoint(address, port);
+        return IPAddress.TryParse(host, out var ip)
+            ? new IPEndPoint(ip, port)
+            : new DnsEndPoint(host, port);
     }
 
-    internal static IPEndPoint RpcEndpoint(IPEndPoint raftEndpoint, int offset) => new(raftEndpoint.Address, raftEndpoint.Port + offset);
+    internal static int PortOf(EndPoint endpoint) => endpoint switch
+    {
+        IPEndPoint ip => ip.Port,
+        DnsEndPoint dns => dns.Port,
+        _ => throw new NotSupportedException($"Unsupported endpoint type {endpoint.GetType()}."),
+    };
+
+    /// <summary>
+    /// The address a node binds its Raft and forwarding listeners to: the IP itself for an IP literal
+    /// (so loopback clusters keep their exact address), or all interfaces for a host name — in the
+    /// latter case the node advertises its <see cref="DnsEndPoint"/> as the public endpoint, so the
+    /// bind address never needs to be resolved.
+    /// </summary>
+    internal static IPAddress BindAddressFor(EndPoint endpoint) => endpoint is IPEndPoint ip ? ip.Address : IPAddress.Any;
+
+    /// <summary>Derives the forwarding endpoint (Raft port + offset), preserving the address form.</summary>
+    internal static EndPoint RpcEndpoint(EndPoint raftEndpoint, int offset) => raftEndpoint switch
+    {
+        IPEndPoint ip => new IPEndPoint(ip.Address, ip.Port + offset),
+        DnsEndPoint dns => new DnsEndPoint(dns.Host, dns.Port + offset, dns.AddressFamily),
+        _ => throw new NotSupportedException($"Unsupported endpoint type {raftEndpoint.GetType()}."),
+    };
 }

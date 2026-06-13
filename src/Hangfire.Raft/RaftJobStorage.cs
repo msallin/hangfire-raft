@@ -31,6 +31,12 @@ public sealed class RaftJobStorage : JobStorage, IAsyncDisposable
     public static RaftJobStorage Start(RaftStorageOptions options)
         => StartAsync(options).GetAwaiter().GetResult();
 
+    /// <summary>
+    /// Returns a point-in-time view of cluster health, suitable for a readiness probe. Treat
+    /// <see cref="RaftClusterHealth.HasLeader"/> as "ready to serve writes".
+    /// </summary>
+    public RaftClusterHealth GetHealth() => Cluster.GetHealth();
+
     /// <inheritdoc />
     public override IStorageConnection GetConnection() => new RaftStorageConnection(this);
 

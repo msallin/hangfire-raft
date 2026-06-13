@@ -102,7 +102,7 @@ spec:
             periodSeconds: 20
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready          # 200 only when the node can reach a leader (has quorum)
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10

@@ -15,9 +15,6 @@
 #   docker build -f samples/Hangfire.Raft.K8sSample/Dockerfile -t hangfire-raft-sample:local .
 #   minikube image load hangfire-raft-sample:local
 #   kubectl apply -f deploy/kubernetes/minikube.yaml
-#
-# Expect one or two pod restarts on first boot: during parallel bootstrap a pod can start before its
-# peers have published DNS records, crash on the failed lookup, and recover on the restart.
 ---
 apiVersion: v1
 kind: Namespace
@@ -116,7 +113,7 @@ spec:
             periodSeconds: 20
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready          # 200 only when the node can reach a leader (has quorum)
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
