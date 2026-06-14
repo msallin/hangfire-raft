@@ -67,6 +67,11 @@ internal sealed class AmbiguousCommandException : Exception
 
 internal sealed class ForwardingServer : IAsyncDisposable
 {
+    // Once a request header has arrived, the rest of the frame must follow promptly; a peer that
+    // stalls mid-frame has its connection dropped instead of parking it indefinitely. The idle wait
+    // for the NEXT header (on a pooled connection) is deliberately not bounded.
+    private static readonly TimeSpan RequestBodyTimeout = TimeSpan.FromSeconds(30);
+
     private readonly TcpListener _listener;
     private readonly Func<ReadOnlyMemory<byte>, CancellationToken, Task<(byte Status, string? Message)>> _handler;
     private readonly ILogger _logger;
@@ -147,7 +152,11 @@ internal sealed class ForwardingServer : IAsyncDisposable
                 }
 
                 var payload = new byte[length];
-                await stream.ReadExactlyAsync(payload, _lifetime.Token).ConfigureAwait(false);
+                using (var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token))
+                {
+                    readTimeout.CancelAfter(RequestBodyTimeout);
+                    await stream.ReadExactlyAsync(payload, readTimeout.Token).ConfigureAwait(false);
+                }
 
                 var (status, message) = await _handler(payload, _lifetime.Token).ConfigureAwait(false);
 

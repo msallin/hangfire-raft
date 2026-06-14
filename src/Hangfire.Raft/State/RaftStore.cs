@@ -116,7 +116,10 @@ internal sealed partial class RaftStore
                 }
             case RequeueFetchedOp o:
                 {
-                    if (_fetched.Remove(o.FetchToken, out var fetched))
+                    // Always drop the lease; only re-enqueue if the job still exists (it may have been
+                    // evicted while fetched). This matches the stale-fetch reclaim in RunMaintenance and
+                    // keeps job eviction the only source of dangling queue entries.
+                    if (_fetched.Remove(o.FetchToken, out var fetched) && _jobs.ContainsKey(fetched.JobId))
                     {
                         Queue(fetched.Queue).AddFirst(fetched.JobId);
                         effects.SignalQueue(fetched.Queue);
@@ -304,21 +307,28 @@ internal sealed partial class RaftStore
 
     private void RunMaintenance(MaintenanceOp op, DateTime now, ApplyEffects effects)
     {
-        foreach (var job in _jobs.Values.Where(j => j.ExpireAt is { } e && e <= now).ToList())
+        var evictedJobs = _jobs.Values.Where(j => j.ExpireAt is { } e && e <= now).ToList();
+        foreach (var job in evictedJobs)
         {
             RemoveFromStateIndex(job);
             _jobs.Remove(job.Id);
         }
 
-        // Drop queue items whose job no longer exists (covers jobs evicted above and earlier).
-        foreach (var queue in _queues.Values)
+        // A queue entry can reference a missing job only as a result of a job eviction (the eviction
+        // that removes a job removes its queue references in the same pass; nothing else enqueues a
+        // non-existent id), so this O(total queued) walk is only needed when something was evicted.
+        // The branch is deterministic across nodes (evictedJobs is a pure function of the envelope time).
+        if (evictedJobs.Count > 0)
         {
-            var node = queue.First;
-            while (node is not null)
+            foreach (var queue in _queues.Values)
             {
-                var next = node.Next;
-                if (!_jobs.ContainsKey(node.Value)) queue.Remove(node);
-                node = next;
+                var node = queue.First;
+                while (node is not null)
+                {
+                    var next = node.Next;
+                    if (!_jobs.ContainsKey(node.Value)) queue.Remove(node);
+                    node = next;
+                }
             }
         }
 

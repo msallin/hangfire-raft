@@ -89,7 +89,8 @@ public sealed class RaftStorageOptions
             throw new FormatException($"Endpoint '{endpoint}' must have the form host:port.");
 
         var host = endpoint[..idx];
-        var port = int.Parse(endpoint[(idx + 1)..]);
+        if (!int.TryParse(endpoint[(idx + 1)..], out var port) || port is < 0 or > 65535)
+            throw new FormatException($"Endpoint '{endpoint}' has an invalid port; expected a number in 0-65535.");
 
         // An IPv6 literal must be bracketed so the colons in the address are not mistaken for the
         // host:port separator; a bare IPv6 literal is rejected rather than silently misparsed.

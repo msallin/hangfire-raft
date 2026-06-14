@@ -1,4 +1,5 @@
 using Hangfire.Raft.Commands;
+using Hangfire.States;
 
 namespace Hangfire.Raft.State;
 
@@ -174,8 +175,10 @@ internal sealed partial class RaftStore
         lock (_sync)
         {
             var result = new List<string>();
-            if (!_lists.TryGetValue(key, out var list) || startingFrom > endingAt) return result;
-            for (var i = startingFrom; i <= endingAt && i < list.Items.Count; i++) result.Add(list.Items[i]);
+            if (!_lists.TryGetValue(key, out var list)) return result;
+            // Clamp the lower bound: a negative startingFrom must not index Items[-1]. An empty range
+            // (startingFrom > endingAt) and a past-the-end endingAt fall out of the loop condition.
+            for (var i = Math.Max(0, startingFrom); i <= endingAt && i < list.Items.Count; i++) result.Add(list.Items[i]);
             return result;
         }
     }
@@ -243,6 +246,22 @@ internal sealed partial class RaftStore
         }
     }
 
+    /// <summary>
+    /// Fetched-lease counts grouped by queue, computed in a single pass. The dashboard lists every
+    /// queue with its fetched count on each render; calling <see cref="GetFetchedCount"/> per queue
+    /// would re-scan all leases once per queue (O(queues x leases)), so the monitoring API uses this.
+    /// </summary>
+    public Dictionary<string, long> GetFetchedCountsByQueue()
+    {
+        lock (_sync)
+        {
+            var result = new Dictionary<string, long>(StringComparer.Ordinal);
+            foreach (var fetched in _fetched.Values)
+                result[fetched.Queue] = result.TryGetValue(fetched.Queue, out var c) ? c + 1 : 1;
+            return result;
+        }
+    }
+
     public List<ServerSnapshot> GetServers()
     {
         lock (_sync)
@@ -281,10 +300,13 @@ internal sealed partial class RaftStore
                 Queues: _queues.Count,
                 Enqueued: _queues.Values.Sum(q => (long)q.Count),
                 Fetched: _fetched.Count,
-                Scheduled: StateCount("Scheduled"),
-                Processing: StateCount("Processing"),
-                Failed: StateCount("Failed"),
-                Awaiting: StateCount("Awaiting"),
+                // State names come from Hangfire's own constants so a typo is a compile error. The
+                // counter and set keys below ("stats:succeeded", "recurring-jobs", ...) have no public
+                // constant and mirror the literals baked into Hangfire core, matched verbatim.
+                Scheduled: StateCount(ScheduledState.StateName),
+                Processing: StateCount(ProcessingState.StateName),
+                Failed: StateCount(FailedState.StateName),
+                Awaiting: StateCount(AwaitingState.StateName),
                 Succeeded: _counters.TryGetValue("stats:succeeded", out var s) ? s.Value : 0,
                 Deleted: _counters.TryGetValue("stats:deleted", out var d) ? d.Value : 0,
                 Recurring: _sets.TryGetValue("recurring-jobs", out var r) ? r.Scores.Count : 0,

@@ -19,6 +19,8 @@ internal sealed class RaftMonitoringApi(RaftJobStorage storage) : JobStorageMoni
     public override IList<QueueWithTopEnqueuedJobsDto> Queues()
     {
         var queues = Store.GetQueues(topJobCount: 5);
+        // One pass over the fetched leases instead of one scan per queue.
+        var fetchedByQueue = Store.GetFetchedCountsByQueue();
         var result = new List<QueueWithTopEnqueuedJobsDto>(queues.Count);
         foreach (var queue in queues)
         {
@@ -26,7 +28,7 @@ internal sealed class RaftMonitoringApi(RaftJobStorage storage) : JobStorageMoni
             {
                 Name = queue.Name,
                 Length = queue.Length,
-                Fetched = Store.GetFetchedCount(queue.Name),
+                Fetched = fetchedByQueue.GetValueOrDefault(queue.Name),
                 FirstJobs = EnqueuedJobs(queue.TopJobIds),
             });
         }

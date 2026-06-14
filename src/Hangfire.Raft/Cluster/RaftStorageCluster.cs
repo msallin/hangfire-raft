@@ -120,6 +120,10 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     /// </summary>
     public async Task<object?> SubmitAsync(Command command, CancellationToken token = default)
     {
+        // A worker that submits during/after shutdown gets the documented storage exception rather
+        // than a raw ObjectDisposedException from the cancellation source it is about to link.
+        if (_lifetime.IsCancellationRequested) throw new RaftStorageException("The storage is shutting down.");
+
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token, _lifetime.Token);
         timeout.CancelAfter(_options.SubmitTimeout);
         var linked = timeout.Token;

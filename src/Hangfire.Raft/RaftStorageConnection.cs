@@ -125,12 +125,16 @@ internal sealed class RaftStorageConnection(RaftJobStorage storage) : JobStorage
         var state = Cluster.Store.GetJob(jobId)?.CurrentState;
         if (state is null) return null;
 
+        // Case-insensitive (like SQL Server storage) and last-wins on a duplicate key, matching the
+        // dashboard's RaftMonitoringApi reader so the two paths cannot disagree on the same data.
+        var data = new Dictionary<string, string>(state.Data.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in state.Data) data[k] = v!;
+
         return new StateData
         {
             Name = state.Name,
             Reason = state.Reason,
-            // Case-insensitive like SQL Server storage, so user filters relying on that keep working.
-            Data = state.Data.ToDictionary(p => p.Key, p => p.Value!, StringComparer.OrdinalIgnoreCase),
+            Data = data,
         };
     }
 
