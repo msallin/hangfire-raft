@@ -29,7 +29,7 @@
 
   <ItemGroup>
     <PackageReference Include="Hangfire.Core" Version="1.8.*" />
-    <PackageReference Include="DotNext.Net.Cluster" Version="5.*" />
+    <PackageReference Include="DotNext.Net.Cluster" Version="6.*" />
     <!-- Hangfire.Core pulls Newtonsoft.Json in transitively; pin a patched version because its floor
          (11.0.1) carries a known high-severity advisory (GHSA-5crp-9r3c-p9vr) that NuGet audit flags. -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
