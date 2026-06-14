@@ -71,6 +71,21 @@ For real node spreading, use `minikube start --nodes 3` with the production mani
 down with `kubectl delete -f deploy/kubernetes/minikube.yaml` (the per-pod PVCs persist; remove them
 with `kubectl -n jobs delete pvc -l app=hangfire`).
 
+### Automated end-to-end test
+
+[`deploy/kubernetes/e2e-test.ps1`](../deploy/kubernetes/e2e-test.ps1) builds and deploys the sample,
+then drives real scenarios against the cluster and asserts the storage guarantees (exactly-once under
+load, cross-pod `DisableConcurrentExecution` serialization, leader failover, and, with
+`-IncludeReschedule`, reschedule re-resolution). It exits non-zero if any scenario fails.
+
+```powershell
+pwsh deploy/kubernetes/e2e-test.ps1                       # core scenarios
+pwsh deploy/kubernetes/e2e-test.ps1 -IncludeReschedule -Teardown
+```
+
+Requires docker, a running minikube, kubectl and the .NET SDK; it leaves the committed manifest
+untouched (the image tag is injected into a temporary copy).
+
 ## How a pod finds its identity
 
 The StatefulSet injects the pod name and namespace via the downward API; the app builds its endpoint
