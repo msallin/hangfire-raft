@@ -67,6 +67,12 @@ spec:
       labels:
         app: hangfire
     spec:
+      securityContext:            # drop root: the pod and its WAL must not run/own as uid 0
+        runAsNonRoot: true
+        # fsGroup makes the PVC-backed /data/wal group-owned by this gid so the non-root user
+        # (runAsUser on the container) can write the write-ahead log. It must match runAsUser and the
+        # Dockerfile USER, or the node fails to open the WAL.
+        fsGroup: 64198
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:  # soft: prefer spreading, but allow co-location on one node
@@ -123,6 +129,12 @@ spec:
               memory: 128Mi
             limits:
               memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 64198              # matches fsGroup above and the Dockerfile USER (keeps /data/wal writable)
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ "ALL" ]
   volumeClaimTemplates:
     - metadata:
         name: wal
