@@ -124,10 +124,9 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     /// and lets the apply waiter decide: if the command was committed after all, the local apply
     /// completes the waiter, otherwise the timeout surfaces an error. Resending an ambiguous
     /// command could apply a non-idempotent op (such as a fetch) twice and lose jobs.
-    /// The send phase and the post-append wait for the local apply each get their own SubmitTimeout
-    /// budget, so a command that did commit is not falsely failed just because reaching the leader was
-    /// slow; a post-append timeout is then surfaced as a distinct (ambiguous) error rather than as the
-    /// always-safe-to-retry "no leader" timeout.
+    /// The whole operation is bounded by a single SubmitTimeout. A timeout after the command was handed
+    /// to the cluster (it may already be committed) is surfaced as a distinct ambiguous error, separate
+    /// from the always-safe-to-retry "no leader" timeout, so the two cannot be confused.
     /// </summary>
     public async Task<object?> SubmitAsync(Command command, CancellationToken token = default)
     {
@@ -205,9 +204,9 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             }
 
             // The command has now been handed to the cluster; from here we only wait for THIS node's
-            // apply. Give that wait its own full budget instead of the leftover send budget, so a command
-            // that did commit is not falsely reported as failed just because reaching the leader was slow.
-            if (appended) timeout.CancelAfter(_options.SubmitTimeout);
+            // apply, under the remaining shared SubmitTimeout budget. On the leader path the apply has
+            // already run by the time ReplicateAsync returns, so this wait is normally immediate; on the
+            // forward path it lasts until the local commit index catches up to the entry.
             return await waiter.WaitAsync(linked).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)

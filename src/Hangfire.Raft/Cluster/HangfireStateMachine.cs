@@ -79,10 +79,14 @@ internal sealed class HangfireStateMachine : MemoryBasedStateMachine
             // older build is replaying an op a newer one wrote. Skipping it is NOT safe here, unlike a
             // best-effort cache: this entry is committed, so other nodes applied it. Silently dropping it
             // would leave this replica permanently behind the log, serving stale reads and folding the
-            // divergence into the next snapshot it builds. Fail loudly instead (same recovery as a corrupt
-            // snapshot: restore or clear this node's WAL so it re-syncs from the leader). The leader
-            // pre-validates decodability before append (see HandleForwardedCommand) and authors its own
-            // entries from valid commands, so a healthy same-version cluster never reaches here.
+            // divergence into the next snapshot it builds. Fail loudly instead.
+            //
+            // Recovery is PER NODE, one at a time: clear THIS node's WAL so it re-syncs from the leader's
+            // snapshot. Never clear every node's WAL at once, that would discard committed history. The
+            // leader pre-validates forwarded commands (see HandleForwardedCommand) and authors its own
+            // entries from round-trip-tested commands, so the realistic trigger is local on-disk corruption
+            // (isolated to one node) or a version-skewed op format (only nodes on the older build wedge,
+            // which is the correct consistency-preserving outcome: roll the binary, do not clear WALs).
             _logger.LogError(ex, "Failed to decode the committed log entry at index {Index}; the on-disk state is corrupt or from an incompatible version.", entry.Index);
             throw new RaftStorageException($"Failed to decode the committed Raft log entry at index {entry.Index}; the on-disk state may be corrupt or from an incompatible version.", ex);
         }
