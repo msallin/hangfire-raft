@@ -1,0 +1,10 @@
+<Project>
+
+  <!-- Newtonsoft.Json 11.0.1 arrives transitively via Hangfire.Core (and so into the samples and tests)
+       and carries GHSA-5crp-9r3c-p9vr. The advisory is accepted repo-wide rather than pinned away;
+       NuGet audit stays active for every other package and any new advisory still fails the build. -->
+  <ItemGroup>
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-5crp-9r3c-p9vr" />
+  </ItemGroup>
+
+</Project>

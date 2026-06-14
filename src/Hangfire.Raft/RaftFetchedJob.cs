@@ -71,7 +71,12 @@ internal sealed class RaftFetchedJob : IFetchedJob
                 // Maintenance already reclaimed the lease (e.g. after a long stall): the job will
                 // run again elsewhere. Stop renewing; this worker's eventual ack becomes a no-op.
                 _renewal.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-                _cluster.Logger.LogWarning("Fetch lease for job {JobId} expired and was reclaimed; the job may run a second time.", JobId);
+
+                // A renewal that simply lost the race with a clean Ack/Requeue also gets `false` here
+                // (the lease is already gone). Only warn about a genuine reclaim of an in-flight job,
+                // not about one that already completed, to avoid a misleading "may run twice" log.
+                if (!_completed && !_disposed)
+                    _cluster.Logger.LogWarning("Fetch lease for job {JobId} expired and was reclaimed; the job may run a second time.", JobId);
             }
         }
         catch (Exception ex)

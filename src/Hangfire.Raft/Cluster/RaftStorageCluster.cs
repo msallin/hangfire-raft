@@ -169,12 +169,14 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                         // the local apply waiter return the result (or time out).
                         await _cluster.ReplicateAsync(entry, linked).ConfigureAwait(false);
                     }
-                    catch (Exception ex) when (ex is not OperationCanceledException && !IsRetryable(ex))
+                    catch (Exception ex) when (ex is not (OperationCanceledException or ObjectDisposedException) && !IsRetryable(ex))
                     {
                         // The entry was appended before this throw, so it may still commit. Mirror the
                         // forward path (HandleForwardedCommand): a flat failure here would let Hangfire
                         // retry into a possible double-apply of a non-idempotent op (a leader-local fetch
                         // or counter increment), so defer to the local apply waiter instead of rethrowing.
+                        // ObjectDisposedException is excluded so a shutdown-time dispose surfaces as the
+                        // documented "shutting down" error rather than waiting out the whole timeout.
                         _logger.LogWarning(ex, "Local replication of command {CommandId} threw after append; treating the outcome as ambiguous and waiting for the local apply.", command.Id);
                     }
 
