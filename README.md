@@ -132,8 +132,8 @@ robustness guard, not an authentication boundary.
 ## Kubernetes
 
 Run the cluster as a StatefulSet behind a headless Service with a per-pod PersistentVolume for the
-WAL. Host names are kept as `DnsEndPoint`s and re-resolved on reconnect, so rescheduled pods rejoin
-on their own and startup tolerates not-yet-resolvable peers. See [docs/kubernetes.md](docs/kubernetes.md)
+WAL. Host names are kept as `DnsEndPoint`s and re-resolved on reconnect, so rescheduled pods rejoin on
+their own (within ~one DNS TTL) and startup tolerates not-yet-resolvable peers. See [docs/kubernetes.md](docs/kubernetes.md)
 for the full guide. Ready-to-use pieces:
 
 - [`deploy/kubernetes/hangfire-raft.yaml`](deploy/kubernetes/hangfire-raft.yaml) — Service,

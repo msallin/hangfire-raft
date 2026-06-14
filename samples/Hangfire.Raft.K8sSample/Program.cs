@@ -2,13 +2,25 @@
 // cluster, no database. Each pod derives its stable identity from the StatefulSet pod name and the
 // headless service (see deploy/kubernetes/hangfire-raft.yaml). Run outside Kubernetes with a plain
 // `dotnet run` and it falls back to a durable single-node cluster on loopback.
+//
+// Trigger endpoints (POST unless noted) let you exercise different job kinds against the cluster:
+//   /enqueue/{n}     n fire-and-forget jobs, each incrementing a replicated "executions" counter
+//   /delayed/{secs}  a job scheduled secs into the future
+//   /flaky           a job that fails twice then succeeds (exercises automatic retry)
+//   /boom            a job that always throws (lands in the Failed state, no retry)
+//   /exclusive/{n}   n jobs contending on one DisableConcurrentExecution lock (must serialize)
+//   /stats   (GET)   replicated demo counters + Hangfire statistics, served from the local node
+using System.Net;
 using Hangfire;
 using Hangfire.Dashboard;
 using Hangfire.Raft;
+using Hangfire.Server;
+using Hangfire.Storage;
 
 var builder = WebApplication.CreateBuilder(args);
 
 var raftOptions = BuildRaftOptions();
+var nodeName = Environment.GetEnvironmentVariable("POD_NAME") ?? Dns.GetHostName();
 Console.WriteLine($"Starting Raft node {raftOptions.SelfEndpoint} (WAL: {raftOptions.WalPath})");
 var storage = await RaftJobStorage.StartAsync(raftOptions);
 
@@ -21,23 +33,61 @@ var app = builder.Build();
 app.MapGet("/health", () => Results.Ok("ok"));
 
 // Readiness: the node can serve writes, i.e. the cluster has a leader it can reach or forward to.
-// A leaderless node (no quorum, or still electing) reports 503 so Kubernetes keeps it out of the
-// dashboard Service's endpoints until it can actually do work.
 app.MapGet("/ready", () => storage.GetHealth().HasLeader
     ? Results.Ok("ready")
     : Results.StatusCode(StatusCodes.Status503ServiceUnavailable));
 
+app.MapPost("/enqueue/{n:int}", (int n) =>
+{
+    for (var i = 0; i < n; i++) BackgroundJob.Enqueue(() => Jobs.Process(i));
+    return Results.Ok($"enqueued {n}");
+});
+
+app.MapPost("/delayed/{secs:int}", (int secs) =>
+{
+    var id = BackgroundJob.Schedule(() => Jobs.Process(-1), TimeSpan.FromSeconds(secs));
+    return Results.Ok($"scheduled {id} in {secs}s");
+});
+
+app.MapPost("/flaky", () => Results.Ok(BackgroundJob.Enqueue(() => Jobs.Flaky(null!))));
+app.MapPost("/boom", () => Results.Ok(BackgroundJob.Enqueue(() => Jobs.Boom())));
+
+app.MapPost("/exclusive/{n:int}", (int n) =>
+{
+    for (var i = 0; i < n; i++) BackgroundJob.Enqueue(() => Jobs.Exclusive(1)); // same arg -> one lock -> serialized
+    return Results.Ok($"enqueued {n} exclusive");
+});
+
+app.MapGet("/stats", () =>
+{
+    var connection = (JobStorageConnection)storage.GetConnection();
+    var monitor = storage.GetMonitoringApi();
+    var stats = monitor.GetStatistics();
+    return Results.Json(new
+    {
+        node = nodeName,
+        leader = storage.GetHealth().IsLeader,
+        executions = connection.GetCounter("demo:executions"),
+        processed = connection.GetSetCount("demo:processed"),
+        stats.Enqueued,
+        stats.Processing,
+        stats.Scheduled,
+        stats.Succeeded,
+        stats.Failed,
+        stats.Servers,
+    });
+});
+
 app.MapGet("/", () => Results.Text("Hangfire.Raft Kubernetes sample. Dashboard at /dashboard."));
 
 // DEMO ONLY: the dashboard is exposed without authentication so it is reachable through a Service
-// or `kubectl port-forward`. Replace AllowAllDashboardAuthorization with a real authorization
-// filter before exposing this anywhere untrusted.
+// or `kubectl port-forward`. Replace AllowAllDashboardAuthorization with a real authorization filter
+// before exposing this anywhere untrusted.
 app.UseHangfireDashboard("/dashboard", new DashboardOptions
 {
     Authorization = [new AllowAllDashboardAuthorization()],
 });
 
-// A little demo work so the dashboard is not empty.
 RecurringJob.AddOrUpdate("heartbeat", () => Jobs.Heartbeat(), Cron.Minutely);
 
 // Leave the cluster gracefully on shutdown so the write-ahead log is closed cleanly.
@@ -83,10 +133,43 @@ static RaftStorageOptions BuildRaftOptions()
     return options;
 }
 
-/// <summary>Demo jobs invoked by the recurring schedule.</summary>
+/// <summary>Demo jobs covering the common Hangfire job shapes, used by the trigger endpoints.</summary>
 public static class Jobs
 {
     public static void Heartbeat() => Console.WriteLine($"[heartbeat] {DateTime.UtcNow:O}");
+
+    /// <summary>Records its execution in replicated state so a test can verify exactly-once across the cluster.</summary>
+    public static void Process(int i)
+    {
+        using var connection = JobStorage.Current.GetConnection();
+        using var transaction = connection.CreateWriteTransaction();
+        transaction.IncrementCounter("demo:executions"); // total executions; > enqueued count would mean double-processing
+        transaction.AddToSet("demo:processed", i.ToString());
+        transaction.Commit();
+        Console.WriteLine($"[process] {i}");
+    }
+
+    /// <summary>Fails the first two attempts and succeeds on the third, exercising automatic retry.</summary>
+    public static void Flaky(PerformContext context)
+    {
+        var attempt = context.GetJobParameter<int>("RetryCount"); // 0 on the first run, then 1, 2, ...
+        Console.WriteLine($"[flaky] attempt {attempt + 1}");
+        if (attempt < 2) throw new InvalidOperationException("transient failure");
+        Console.WriteLine("[flaky] succeeded");
+    }
+
+    /// <summary>Always throws; with no retries it lands directly in the Failed state.</summary>
+    [AutomaticRetry(Attempts = 0)]
+    public static void Boom() => throw new InvalidOperationException("permanent failure");
+
+    /// <summary>Holds a cluster-wide lock while running, so concurrent invocations must serialize.</summary>
+    [DisableConcurrentExecution(timeoutInSeconds: 60)]
+    public static void Exclusive(int key)
+    {
+        Console.WriteLine($"[exclusive {key}] enter {DateTime.UtcNow:O}");
+        Thread.Sleep(800);
+        Console.WriteLine($"[exclusive {key}] exit  {DateTime.UtcNow:O}");
+    }
 }
 
 /// <summary>DEMO ONLY authorization filter that allows every dashboard request. Do not use as-is.</summary>

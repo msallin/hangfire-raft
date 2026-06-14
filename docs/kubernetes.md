@@ -102,10 +102,16 @@ resolves lazily and re-resolves on every reconnect.
 - **Rescheduled pods rejoin on their own.** Host names in `SelfEndpoint`/`Members` are kept as
   `DnsEndPoint`s rather than resolved to fixed IPs, and both the Raft transport and the
   command-forwarding channel re-resolve them on every reconnection. When a pod reschedules — same
-  StatefulSet name, new IP — its peers reach it again at the new address on their next reconnect,
-  with no rolling restart, and member identity (derived from the host name) is unchanged. The only
-  delay is your cluster DNS TTL (CoreDNS serves the updated record within seconds), so a 3-node
-  cluster's fault tolerance returns by itself shortly after a reschedule.
+  StatefulSet name, new IP — its peers reach it again at the new address with no rolling restart, and
+  member identity (derived from the host name) is unchanged.
+
+  The reintegration is not instant: a peer keeps reaching the **old** IP until its DNS cache expires,
+  bounded by the headless service's record TTL — **30 seconds by default in CoreDNS**. Until the peers
+  re-resolve, the rescheduled pod does not count toward quorum from their point of view, so the
+  cluster's fault tolerance is reduced for up to ~one TTL after a reschedule: a *second* failure
+  inside that window can pause writes until the TTL expires (verified on a 3-node cluster — writes
+  resume on their own once peers re-resolve). For faster recovery, lower the CoreDNS `ttl` (or stage
+  rolling updates so reschedules are at least one TTL apart).
 
 - **Bootstrap tolerates not-yet-resolvable peers.** Members are resolved lazily, so a pod that starts
   before its peers have DNS records does not crash; the transport logs the unreachable member and
