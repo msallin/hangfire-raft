@@ -12,9 +12,9 @@ namespace Hangfire.Raft.Monitoring;
 /// Dashboard read API. All data comes from the local node's store, so dashboard pages reflect the
 /// locally applied log prefix; on a healthy cluster that is at most a heartbeat behind the leader.
 /// </summary>
-internal sealed class RaftMonitoringApi(RaftJobStorage storage) : JobStorageMonitor
+internal sealed class RaftMonitoringApi(RaftStore store) : JobStorageMonitor
 {
-    private RaftStore Store => storage.Cluster.Store;
+    private RaftStore Store => store;
 
     public override IList<QueueWithTopEnqueuedJobsDto> Queues()
     {
@@ -338,7 +338,7 @@ internal sealed class RaftMonitoringApi(RaftJobStorage storage) : JobStorageMoni
     /// Extracts the state name from an awaiting continuation's serialized NextState JSON.
     /// Input:  {"$type":"...","Name":"Enqueued",...} -> "Enqueued"; unparseable input -> null.
     /// </summary>
-    private static string? ParseStateName(string nextStateJson)
+    internal static string? ParseStateName(string nextStateJson)
     {
         const string marker = "\"Name\":\"";
         var start = nextStateJson.IndexOf(marker, StringComparison.OrdinalIgnoreCase);

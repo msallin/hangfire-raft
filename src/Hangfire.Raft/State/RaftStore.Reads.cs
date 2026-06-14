@@ -326,6 +326,7 @@ internal sealed partial class RaftStore
         [.. job.History]);
 }
 
+/// <summary>Aggregate counts behind the dashboard's statistics panel, read from the local store.</summary>
 internal sealed record StatisticsSnapshot(
     long Servers,
     long Queues,

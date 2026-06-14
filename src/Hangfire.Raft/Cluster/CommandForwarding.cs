@@ -65,6 +65,11 @@ internal sealed class AmbiguousCommandException : Exception
     }
 }
 
+/// <summary>
+/// Listens on a node's RPC endpoint (Raft port + offset) for commands forwarded by followers and
+/// runs each one through the handler, which replicates it when this node is the leader. Connections
+/// are long-lived: a follower reuses one connection for many requests.
+/// </summary>
 internal sealed class ForwardingServer : IAsyncDisposable
 {
     // Once a request header has arrived, the rest of the frame must follow promptly; a peer that
@@ -197,6 +202,11 @@ internal sealed class ForwardingServer : IAsyncDisposable
     }
 }
 
+/// <summary>
+/// Sends a follower's commands to the current leader's RPC endpoint over pooled, reused TCP
+/// connections, and maps the response status onto the submit pipeline's exception taxonomy
+/// (ok / not-leader / ambiguous / error).
+/// </summary>
 internal sealed class ForwardingClient : IDisposable
 {
     // Keyed by EndPoint so a DnsEndPoint and an IPEndPoint pool independently. Connecting by a

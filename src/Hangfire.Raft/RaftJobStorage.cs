@@ -41,7 +41,7 @@ public sealed class RaftJobStorage : JobStorage, IAsyncDisposable
     public override IStorageConnection GetConnection() => new RaftStorageConnection(this);
 
     /// <inheritdoc />
-    public override IMonitoringApi GetMonitoringApi() => new RaftMonitoringApi(this);
+    public override IMonitoringApi GetMonitoringApi() => new RaftMonitoringApi(Cluster.Store);
 
     private static readonly HashSet<string> SupportedFeatures = new(StringComparer.OrdinalIgnoreCase)
     {

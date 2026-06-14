@@ -14,6 +14,9 @@ internal sealed class RaftWriteOnlyTransaction(RaftJobStorage storage) : JobStor
     private readonly List<StoreOp> _ops = [];
     private bool _committed;
 
+    /// <summary>The ops queued so far. Exposed for tests to assert the Hangfire-call-to-StoreOp mapping without a round-trip.</summary>
+    internal IReadOnlyList<StoreOp> PendingOps => _ops;
+
     public override void Commit()
     {
         if (_committed) throw new InvalidOperationException("The transaction was already committed.");

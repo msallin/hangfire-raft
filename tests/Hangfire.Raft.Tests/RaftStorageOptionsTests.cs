@@ -55,4 +55,35 @@ public class RaftStorageOptionsTests
         Assert.Equal(IPAddress.Loopback, RaftStorageOptions.BindAddressFor(new IPEndPoint(IPAddress.Loopback, 5000)));
         Assert.Equal(IPAddress.Any, RaftStorageOptions.BindAddressFor(new DnsEndPoint("node", 5000)));
     }
+
+    [Theory]
+    [InlineData("host:99999")]  // out of the 0-65535 range
+    [InlineData("host:-1")]
+    [InlineData("host:notnum")]
+    public void ParseEndpoint_RejectsInvalidPort(string endpoint)
+        => Assert.Throws<FormatException>(() => RaftStorageOptions.ParseEndpoint(endpoint));
+
+    [Fact]
+    public void ClusterMembers_Throws_WhenEmpty()
+    {
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:5000" };
+        Assert.Throws<InvalidOperationException>(() => _ = options.ClusterMembers);
+    }
+
+    [Fact]
+    public void ClusterMembers_Throws_WhenSelfNotListed()
+    {
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:5000" };
+        options.Members.Add("127.0.0.1:6000");
+        Assert.Throws<InvalidOperationException>(() => _ = options.ClusterMembers);
+    }
+
+    [Fact]
+    public void ClusterMembers_Succeeds_WhenSelfListed()
+    {
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:5000" };
+        options.Members.Add("127.0.0.1:5000");
+        options.Members.Add("node2:5000");
+        Assert.Equal(2, options.ClusterMembers.Count);
+    }
 }

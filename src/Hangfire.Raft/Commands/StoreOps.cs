@@ -14,6 +14,7 @@ namespace Hangfire.Raft.Commands;
 /// </summary>
 internal abstract record StoreOp;
 
+/// <summary>Stable byte tag for each <see cref="StoreOp"/> on the wire. Values must not be renumbered or reused once shipped, or an existing write-ahead log would decode wrongly.</summary>
 internal enum OpCode : byte
 {
     CreateJob = 1,

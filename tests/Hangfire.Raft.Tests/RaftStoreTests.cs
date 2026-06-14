@@ -670,6 +670,88 @@ public class RaftStoreTests
         Assert.Equal(0, restored.GetQueueLength("default")); // b was fetched
     }
 
+    // ----- read boundaries and op edge cases -----
+
+    [Fact]
+    public void GetRangeFromList_ClampsNegativeStart_AndHandlesEmptyRange()
+    {
+        Apply(T0, new InsertToListOp("l", "a"), new InsertToListOp("l", "b")); // newest-first: b, a
+
+        Assert.Equal(["b", "a"], _store.GetRangeFromList("l", -5, 10)); // negative start clamps to 0
+        Assert.Empty(_store.GetRangeFromList("l", 5, 1));               // from > to
+        Assert.Equal(["b", "a"], _store.GetRangeFromList("l", 0, 99)); // past-end upper bound
+    }
+
+    [Fact]
+    public void RequeueFetched_UnknownToken_IsNoOp()
+    {
+        var effects = ApplyWithEffects(T0, new RequeueFetchedOp(Guid.NewGuid()));
+        Assert.Null(effects.SignaledQueues);
+    }
+
+    [Fact]
+    public void RequeueFetched_DoesNotReEnqueue_AnEvictedJob()
+    {
+        Apply(T0, NewJob("a"), new EnqueueOp("q", "a"), new ExpireJobOp("a", T0.AddMinutes(1)));
+        var token = Guid.NewGuid();
+        Apply(T0, new FetchOp(["q"], token));
+        Apply(T0.AddMinutes(2), new MaintenanceOp(TimeSpan.FromMinutes(5))); // evicts "a" (expired), lease not yet stale
+
+        Apply(T0.AddMinutes(2), new RequeueFetchedOp(token)); // drops the lease; "a" is gone so it is not re-enqueued
+        Assert.Equal(0, _store.GetQueueLength("q"));
+    }
+
+    [Fact]
+    public void Counter_IsRecreated_AfterReachingZero()
+    {
+        Apply(T0, new IncrementCounterOp("c", 1, null));
+        Apply(T0, new IncrementCounterOp("c", -1, null)); // back to zero -> entry removed
+        Assert.Equal(0, _store.GetCounter("c"));
+
+        Apply(T0, new IncrementCounterOp("c", 1, null));   // re-created from nothing
+        Assert.Equal(1, _store.GetCounter("c"));
+    }
+
+    [Fact]
+    public void RemoveServer_RemovesOnlyThatServer()
+    {
+        Apply(T0, new AnnounceServerOp("a", 1, []), new AnnounceServerOp("b", 1, []));
+        Apply(T0, new RemoveServerOp("a"));
+        Assert.Equal("b", Assert.Single(_store.GetServers()).Id);
+    }
+
+    [Fact]
+    public void RemoveTimedOutServers_RemovesOnlyStaleServers()
+    {
+        Apply(T0, new AnnounceServerOp("stale", 1, []));
+        Apply(T0.AddMinutes(10), new AnnounceServerOp("fresh", 1, []));
+
+        var removed = (int)Apply(T0.AddMinutes(11), new RemoveTimedOutServersOp(TimeSpan.FromMinutes(5)))!;
+        Assert.Equal(1, removed);
+        Assert.Equal("fresh", Assert.Single(_store.GetServers()).Id);
+    }
+
+    // ----- snapshot edge cases -----
+
+    [Fact]
+    public void LoadSnapshot_Throws_OnUnknownVersion()
+    {
+        var snapshot = Serialize(_store);
+        snapshot[0] = 0xFF; // corrupt the version byte
+        var other = new RaftStore();
+        using var reader = new BinaryReader(new MemoryStream(snapshot), Encoding.UTF8);
+        Assert.Throws<NotSupportedException>(() => other.LoadSnapshot(reader));
+    }
+
+    [Fact]
+    public void Snapshot_RoundtripsAnEmptyStore()
+    {
+        var snapshot = Serialize(_store); // brand-new, every table empty
+        var other = new RaftStore();
+        using (var reader = new BinaryReader(new MemoryStream(snapshot), Encoding.UTF8)) other.LoadSnapshot(reader);
+        Assert.Equal(snapshot, Serialize(other)); // every zero-count table prefix round-trips
+    }
+
     private static byte[] Serialize(RaftStore store)
     {
         using var stream = new MemoryStream();

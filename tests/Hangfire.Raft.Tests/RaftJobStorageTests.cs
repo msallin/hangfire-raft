@@ -489,4 +489,149 @@ public class RaftJobStorageTests : IDisposable
         Assert.Equal(1, stats.Recurring);
         Assert.Equal(1, stats.Succeeded);
     }
+
+    [Fact]
+    public async Task Connection_ValidatesArguments()
+    {
+        var storage = await StartSingleNode();
+        using var c = (JobStorageConnection)storage.GetConnection();
+
+        Assert.Throws<ArgumentException>(() => c.FetchNextJob([], CancellationToken.None));
+        Assert.Throws<ArgumentException>(() => c.FetchNextJob(null!, CancellationToken.None));
+        Assert.Throws<ArgumentException>(() => c.GetFirstByLowestScoreFromSet("s", 0, 10, 0)); // count <= 0
+        Assert.Throws<ArgumentException>(() => c.GetFirstByLowestScoreFromSet("s", 10, 0));     // fromScore > toScore
+        Assert.Throws<ArgumentOutOfRangeException>(() => c.GetSetCount(["s"], -1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => c.RemoveTimedOutServers(TimeSpan.FromSeconds(-1)));
+        Assert.Throws<ArgumentException>(() => c.GetJobData(""));
+        Assert.Throws<ArgumentException>(() => c.GetAllItemsFromSet(""));
+        Assert.Throws<ArgumentException>(() => c.GetValueFromHash("", "f"));
+    }
+
+    [Fact]
+    public async Task Storage_AdvertisesFeatures_AndDescribesItself()
+    {
+        var storage = await StartSingleNode();
+
+        Assert.True(storage.HasFeature(JobStorageFeatures.ExtendedApi));
+        Assert.True(storage.HasFeature(JobStorageFeatures.Transaction.CreateJob));
+        Assert.False(storage.HasFeature("some.unknown.feature"));
+        Assert.Contains("Raft", storage.ToString());
+    }
+
+    [Fact]
+    public async Task Connection_ReadsBackEverythingWritten()
+    {
+        var storage = await StartSingleNode();
+        using var c = (JobStorageConnection)storage.GetConnection();
+
+        using (var tx = (JobStorageTransaction)c.CreateWriteTransaction())
+        {
+            tx.AddToSet("s", "a", 1);
+            tx.AddToSet("s", "b", 2);
+            tx.ExpireSet("s", TimeSpan.FromMinutes(5));
+            tx.InsertToList("l", "x");
+            tx.InsertToList("l", "y");
+            tx.ExpireList("l", TimeSpan.FromMinutes(5));
+            tx.SetRangeInHash("h", [new KeyValuePair<string, string>("f", "v")]);
+            tx.ExpireHash("h", TimeSpan.FromMinutes(5));
+            tx.IncrementCounter("cnt");
+            tx.Commit();
+        }
+
+        // sets
+        Assert.Equal(["a", "b"], c.GetAllItemsFromSet("s").OrderBy(x => x));
+        Assert.Equal(2, c.GetSetCount("s"));
+        Assert.True(c.GetSetContains("s", "a"));
+        Assert.False(c.GetSetContains("s", "z"));
+        Assert.Contains("a", c.GetRangeFromSet("s", 0, 10));
+        Assert.Equal("a", c.GetFirstByLowestScoreFromSet("s", 0, 5));
+        Assert.True(c.GetSetTtl("s") > TimeSpan.Zero);
+        // lists (newest-first)
+        Assert.Equal(["y", "x"], c.GetAllItemsFromList("l"));
+        Assert.Equal(2, c.GetListCount("l"));
+        Assert.Equal(["y"], c.GetRangeFromList("l", 0, 0));
+        Assert.True(c.GetListTtl("l") > TimeSpan.Zero);
+        // hash
+        Assert.Equal("v", c.GetValueFromHash("h", "f"));
+        Assert.Equal(1, c.GetHashCount("h"));
+        Assert.True(c.GetHashTtl("h") > TimeSpan.Zero);
+        Assert.Equal("v", c.GetAllEntriesFromHash("h")!["f"]);
+        // counter
+        Assert.Equal(1, c.GetCounter("cnt"));
+
+        // job parameter round-trip
+        var jobId = c.CreateExpiredJob(Job.FromExpression(() => TestJobs.Run("x")), new Dictionary<string, string>(), DateTime.UtcNow, TimeSpan.FromDays(1));
+        c.SetJobParameter(jobId, "p", "1");
+        Assert.Equal("1", c.GetJobParameter(jobId, "p"));
+    }
+
+    [Fact]
+    public async Task FetchedJob_DisposeWithoutAck_RequeuesTheJob()
+    {
+        var storage = await StartSingleNode();
+        using var connection = (JobStorageConnection)storage.GetConnection();
+
+        var jobId = connection.CreateExpiredJob(Job.FromExpression(() => TestJobs.Run("x")), new Dictionary<string, string>(), DateTime.UtcNow, TimeSpan.FromDays(1));
+        using (var transaction = connection.CreateWriteTransaction())
+        {
+            transaction.AddToQueue("q", jobId);
+            transaction.Commit();
+        }
+
+        var fetched = connection.FetchNextJob(["q"], CancellationToken.None);
+        Assert.Equal(jobId, fetched.JobId);
+        fetched.Dispose(); // neither acked nor explicitly requeued -> Dispose requeues
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var refetched = connection.FetchNextJob(["q"], timeout.Token);
+        Assert.Equal(jobId, refetched.JobId);
+        refetched.RemoveFromQueue();
+    }
+
+    [Fact]
+    public async Task FetchedJob_RenewalKeepsTheLeaseAlive_PastTheInvisibilityTimeout()
+    {
+        var port = AllocatePortPairs(1)[0];
+        var storage = await StartNode(port, [port], configure: o =>
+        {
+            o.FetchInvisibilityTimeout = TimeSpan.FromMilliseconds(600); // renew every ~200ms
+            o.MaintenanceInterval = TimeSpan.FromMilliseconds(300);      // frequent reclaim attempts
+        });
+        using var connection = (JobStorageConnection)storage.GetConnection();
+
+        var jobId = connection.CreateExpiredJob(Job.FromExpression(() => TestJobs.Run("x")), new Dictionary<string, string>(), DateTime.UtcNow, TimeSpan.FromDays(1));
+        using (var transaction = connection.CreateWriteTransaction())
+        {
+            transaction.AddToQueue("q", jobId);
+            transaction.Commit();
+        }
+
+        using var fetched = connection.FetchNextJob(["q"], CancellationToken.None);
+        var monitor = (Hangfire.Storage.JobStorageMonitor)storage.GetMonitoringApi();
+
+        // Hold well past the invisibility timeout: the background renewal must keep maintenance from
+        // reclaiming the lease, so the job stays fetched and is not put back on the queue.
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        Assert.Equal(1, monitor.FetchedCount("q"));
+        Assert.Equal(0, monitor.EnqueuedCount("q"));
+        fetched.RemoveFromQueue();
+    }
+
+    [Fact]
+    public async Task GetHealth_OnAFollower_ReportsTheRemoteLeader()
+    {
+        var ports = AllocatePortPairs(3);
+        var nodes = (await Task.WhenAll(ports.Select(p => StartNode(p, ports)))).ToList();
+
+        RaftJobStorage follower = null!;
+        await PollUntil(
+            () => (follower = nodes.FirstOrDefault(n => n.GetHealth() is { HasLeader: true, IsLeader: false })!) is not null,
+            "a follower that sees a remote leader");
+
+        var health = follower.GetHealth();
+        Assert.True(health.HasLeader);
+        Assert.False(health.IsLeader);
+        Assert.NotNull(health.LeaderEndpoint);
+        Assert.True(health.MemberCount >= 2);
+    }
 }
