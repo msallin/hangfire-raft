@@ -25,9 +25,9 @@ jobs:
 
       - name: Enable auto-merge
         # `--auto` queues the merge; GitHub completes it only after the required CI check is green.
-        # To stop auto-merging major bumps, gate this on
-        # steps.metadata.outputs.update-type != 'version-update:semver-major'.
-        run: gh pr merge --auto --squash "$PR_URL"
+        # --rebase matches the repo's only enabled merge method. To stop auto-merging major bumps,
+        # gate this on steps.metadata.outputs.update-type != 'version-update:semver-major'.
+        run: gh pr merge --auto --rebase "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
