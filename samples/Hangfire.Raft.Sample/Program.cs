@@ -12,8 +12,26 @@ using Hangfire.Raft.Sample;
 const int basePort = 4100;
 
 var nodeArg = args.Length > 0 ? args[0] : "single";
-var runForSeconds = args.Length > 1 ? int.Parse(args[1]) : (int?)null;
-var nodeIndex = nodeArg == "single" ? -1 : int.Parse(nodeArg);
+
+int? runForSeconds = null;
+if (args.Length > 1)
+{
+    if (!int.TryParse(args[1], out var parsedSeconds) || parsedSeconds <= 0)
+        throw new ArgumentException("The second argument must be a positive number of seconds, e.g. `dotnet run -- single 20`.");
+    runForSeconds = parsedSeconds;
+}
+
+int nodeIndex;
+if (nodeArg == "single")
+{
+    nodeIndex = -1;
+}
+else if (!int.TryParse(nodeArg, out nodeIndex) || nodeIndex is < 0 or > 2)
+{
+    // This demo wires up a fixed three-node cluster, so a node index outside 0..2 would build a
+    // SelfEndpoint that is not in Members and fail to start with a confusing error.
+    throw new ArgumentException("The first argument must be 'single' or a node index 0, 1, or 2, e.g. `dotnet run -- 0`.");
+}
 
 var options = new RaftStorageOptions
 {

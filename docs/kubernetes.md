@@ -91,9 +91,10 @@ untouched (the image tag is injected into a temporary copy).
 The StatefulSet injects the pod name and namespace via the downward API; the app builds its endpoint
 and the full member list from them (see `BuildRaftOptions` in the sample):
 
-```
+```text
 SelfEndpoint = {POD_NAME}.{RAFT_SERVICE}.{POD_NAMESPACE}.svc.cluster.local:5000
-Members      = {RAFT_SERVICE}-{0..RAFT_REPLICAS-1}.{RAFT_SERVICE}.{POD_NAMESPACE}.svc.cluster.local:5000
+Members      = {STATEFULSET}-{0..RAFT_REPLICAS-1}.{RAFT_SERVICE}.{POD_NAMESPACE}.svc.cluster.local:5000
+               # STATEFULSET = POD_NAME up to its ordinal (hangfire-0 -> hangfire), which may differ from RAFT_SERVICE
 ```
 
 `SelfEndpoint` matches exactly one `Members` entry (compared by host name, with no DNS lookup), which

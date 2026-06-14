@@ -34,14 +34,14 @@ the local node's replica.
 
 Try it locally with the sample:
 
-```
+```bash
 dotnet run --project samples/Hangfire.Raft.Sample              # single node
 dotnet run --project samples/Hangfire.Raft.Sample -- 0         # three terminals: nodes 0, 1, 2
 ```
 
 ## How it works
 
-```
+```text
 Hangfire API call (enqueue, state change, fetch, lock, ...)
         |
         v
@@ -145,7 +145,7 @@ for the full guide. Ready-to-use pieces:
 
 ## Project layout
 
-```
+```text
 src/Hangfire.Raft             the storage implementation
   Commands/                   replicated op set + binary wire format
   State/                      deterministic in-memory store + snapshot format

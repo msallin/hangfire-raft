@@ -60,7 +60,7 @@ app.MapPost("/exclusive/{n:int}", (int n) =>
 
 app.MapGet("/stats", () =>
 {
-    var connection = (JobStorageConnection)storage.GetConnection();
+    using var connection = (JobStorageConnection)storage.GetConnection();
     var monitor = storage.GetMonitoringApi();
     var stats = monitor.GetStatistics();
     return Results.Json(new

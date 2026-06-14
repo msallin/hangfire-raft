@@ -61,6 +61,11 @@ function Record($name, $passed, $detail) {
     $color = if ($passed) { 'Green' } else { 'Red' }
     Write-Host ("[{0}] {1} - {2}" -f $tag, $name, $detail) -ForegroundColor $color
 }
+function Assert-LastExit($step) {
+    # Native tools signal failure via exit code (PSNativeCommandUseErrorActionPreference is off), so the
+    # critical deploy steps check it explicitly and stop instead of pressing on against a broken cluster.
+    if ($LASTEXITCODE -ne 0) { throw "$step failed (exit code $LASTEXITCODE)." }
+}
 
 # --- HTTP helpers (drive the cluster through a port-forward) ---
 function Start-Forward($target, $localPort) {
@@ -98,19 +103,21 @@ function Wait-PodReady($pod, $timeoutSec = 120) {
 if (-not $SkipBuild) {
     Step "Build solution"
     dotnet build (Join-Path $repo 'Hangfire.Raft.slnx') -c Release | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
+    Assert-LastExit 'dotnet build'
 
     Step "Build image $image"
     docker build -f (Join-Path $repo 'samples\Hangfire.Raft.K8sSample\Dockerfile') -t $image $repo | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'docker build failed.' }
+    Assert-LastExit 'docker build'
 }
 
 Step "Reset namespace $Namespace"
 kubectl delete namespace $Namespace --ignore-not-found --wait=true | Out-Null
+Assert-LastExit 'kubectl delete namespace'
 
 Step "Load image into minikube"
 # Loading after the namespace is gone guarantees no running pod is pinning an older copy of the tag.
 & $minikube image load $image | Out-Null
+Assert-LastExit 'minikube image load'
 
 Step "Deploy (image -> $image)"
 # Inject the tag into a temporary copy so the committed manifest keeps its default :local image.
@@ -118,7 +125,9 @@ $rendered = (Get-Content $manifest -Raw) -replace 'image: hangfire-raft-sample:\
 $tempManifest = Join-Path ([System.IO.Path]::GetTempPath()) "hangfire-raft-e2e-$Tag.yaml"
 Set-Content -Path $tempManifest -Value $rendered
 kubectl apply -f $tempManifest | Out-Null
+Assert-LastExit 'kubectl apply'
 kubectl -n $Namespace rollout status statefulset/hangfire --timeout=180s
+Assert-LastExit 'kubectl rollout status'
 
 $pods = (kubectl -n $Namespace get pods -o jsonpath='{.items[*].metadata.name}').Split(' ')
 Write-Host "pods: $($pods -join ', ')"
