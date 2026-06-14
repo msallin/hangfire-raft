@@ -38,8 +38,11 @@ internal sealed partial class RaftStore
         return effects;
     }
 
-    // When adding a new op: extend this switch; unknown ops throw so a forgotten case cannot
-    // silently diverge the replicated state.
+    // When adding a new op: extend this switch; unknown ops throw so a forgotten case cannot silently
+    // diverge the replicated state. Op handlers must otherwise NOT throw for a well-formed (decoded)
+    // command: Apply mutates in place with no rollback, so a throw mid-batch would leave partial state
+    // and fault the apply pipeline. The serializer rejects unknown opcodes at decode and the leader
+    // pre-validates decodability before append, so a committed command only ever carries known ops.
     private object? ApplyOp(StoreOp op, DateTime now, ApplyEffects effects)
     {
         switch (op)
@@ -116,9 +119,9 @@ internal sealed partial class RaftStore
                 }
             case RequeueFetchedOp o:
                 {
-                    // Always drop the lease; only re-enqueue if the job still exists (it may have been
-                    // evicted while fetched). This matches the stale-fetch reclaim in RunMaintenance and
-                    // keeps job eviction the only source of dangling queue entries.
+                    // Always drop the lease; re-enqueue only if the job still exists. Maintenance no
+                    // longer evicts a job while it is fetched, so this guard is defensive (and matches
+                    // the stale-fetch reclaim in RunMaintenance).
                     if (_fetched.Remove(o.FetchToken, out var fetched) && _jobs.ContainsKey(fetched.JobId))
                     {
                         Queue(fetched.Queue).AddFirst(fetched.JobId);
@@ -307,7 +310,12 @@ internal sealed partial class RaftStore
 
     private void RunMaintenance(MaintenanceOp op, DateTime now, ApplyEffects effects)
     {
-        var evictedJobs = _jobs.Values.Where(j => j.ExpireAt is { } e && e <= now).ToList();
+        // Never evict a job that is currently held under a fetch lease: the worker (or the stale-fetch
+        // reclaim below) still needs it. Otherwise an ExpireJob racing an in-flight fetch could drop the
+        // job with zero executions instead of letting it run. The fetched-id set is a deterministic
+        // function of _fetched, so every replica makes the same decision.
+        var fetchedJobIds = _fetched.Values.Select(f => f.JobId).ToHashSet(StringComparer.Ordinal);
+        var evictedJobs = _jobs.Values.Where(j => j.ExpireAt is { } e && e <= now && !fetchedJobIds.Contains(j.Id)).ToList();
         foreach (var job in evictedJobs)
         {
             RemoveFromStateIndex(job);

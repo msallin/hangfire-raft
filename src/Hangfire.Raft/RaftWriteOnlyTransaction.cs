@@ -9,6 +9,14 @@ namespace Hangfire.Raft;
 /// Collects ops and replicates them as a single command on <see cref="Commit"/>, so the whole
 /// transaction applies atomically on every node or not at all.
 /// </summary>
+/// <remarks>
+/// Absolute-expiry ops (ExpireJob/ExpireSet/ExpireList/ExpireHash, IncrementCounter-with-expiry, and a
+/// state's CreatedAt) resolve <see cref="DateTime.UtcNow"/> here at queue time rather than from the
+/// command envelope stamped at <see cref="Commit"/>. The absolute instant is baked into the op before
+/// replication, so every replica applies byte-identical values and determinism is preserved; the only
+/// effect is a sub-millisecond skew between an op's expiry baseline and the envelope timestamp. This is
+/// intentional: it keeps each op self-contained and avoids resolving relative offsets in the apply path.
+/// </remarks>
 internal sealed class RaftWriteOnlyTransaction(RaftJobStorage storage) : JobStorageTransaction
 {
     private readonly List<StoreOp> _ops = [];

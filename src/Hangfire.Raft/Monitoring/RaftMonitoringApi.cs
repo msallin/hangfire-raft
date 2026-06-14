@@ -243,17 +243,17 @@ internal sealed class RaftMonitoringApi(RaftStore store) : JobStorageMonitor
         return Store.GetFetchedCount(queue);
     }
 
-    public override IDictionary<DateTime, long> SucceededByDatesCount() => DailyCounts("succeeded");
+    public override IDictionary<DateTime, long> SucceededByDatesCount() => DailyCounts("succeeded", DateTime.UtcNow);
 
-    public override IDictionary<DateTime, long> FailedByDatesCount() => DailyCounts("failed");
+    public override IDictionary<DateTime, long> FailedByDatesCount() => DailyCounts("failed", DateTime.UtcNow);
 
-    public override IDictionary<DateTime, long> DeletedByDatesCount() => DailyCounts("deleted");
+    public override IDictionary<DateTime, long> DeletedByDatesCount() => DailyCounts("deleted", DateTime.UtcNow);
 
-    public override IDictionary<DateTime, long> HourlySucceededJobs() => HourlyCounts("succeeded");
+    public override IDictionary<DateTime, long> HourlySucceededJobs() => HourlyCounts("succeeded", DateTime.UtcNow);
 
-    public override IDictionary<DateTime, long> HourlyFailedJobs() => HourlyCounts("failed");
+    public override IDictionary<DateTime, long> HourlyFailedJobs() => HourlyCounts("failed", DateTime.UtcNow);
 
-    public override IDictionary<DateTime, long> HourlyDeletedJobs() => HourlyCounts("deleted");
+    public override IDictionary<DateTime, long> HourlyDeletedJobs() => HourlyCounts("deleted", DateTime.UtcNow);
 
     private JobList<TDto> MapState<TDto>(string stateName, int from, int count, bool ascending, Func<JobSnapshot, Dictionary<string, string>, TDto> map)
     {
@@ -267,11 +267,13 @@ internal sealed class RaftMonitoringApi(RaftStore store) : JobStorageMonitor
         return new JobList<TDto>(result);
     }
 
-    private Dictionary<DateTime, long> DailyCounts(string type)
+    // `now` is a parameter (rather than read inline) so tests can pin a fixed instant and assert the
+    // bucket math without a day/hour-boundary race; production passes DateTime.UtcNow.
+    internal Dictionary<DateTime, long> DailyCounts(string type, DateTime now)
     {
         // Counter keys are written by Hangfire core with invariant formatting; matching must not
         // depend on the dashboard thread's culture (calendars, digit substitution).
-        var today = DateTime.UtcNow.Date;
+        var today = now.Date;
         var result = new Dictionary<DateTime, long>();
         for (var i = 0; i < 7; i++)
         {
@@ -282,9 +284,8 @@ internal sealed class RaftMonitoringApi(RaftStore store) : JobStorageMonitor
         return result;
     }
 
-    private Dictionary<DateTime, long> HourlyCounts(string type)
+    internal Dictionary<DateTime, long> HourlyCounts(string type, DateTime now)
     {
-        var now = DateTime.UtcNow;
         var hour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc);
         var result = new Dictionary<DateTime, long>();
         for (var i = 0; i < 24; i++)

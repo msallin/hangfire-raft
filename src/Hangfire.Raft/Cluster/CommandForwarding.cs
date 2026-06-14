@@ -215,6 +215,13 @@ internal sealed class ForwardingClient : IDisposable
     private readonly ConcurrentDictionary<EndPoint, ConcurrentBag<TcpClient>> _pool = new();
     private volatile bool _disposed;
 
+    // A single connect attempt is capped well under the caller's SubmitTimeout so a black-holed peer
+    // IP (a SYN that never gets a response) cannot burn the whole budget here, leaving nothing for the
+    // submit loop to re-resolve the leader and try a fresh address. The send/receive phases stay bound
+    // by the caller's token: a slow response is genuinely ambiguous and must not be cut short into a
+    // retry of a possibly-committed command.
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(5);
+
     /// <summary>Sends a command to the given node and waits for the commit acknowledgement.</summary>
     public async Task SubmitAsync(EndPoint endpoint, ReadOnlyMemory<byte> payload, CancellationToken token)
     {
@@ -290,12 +297,25 @@ internal sealed class ForwardingClient : IDisposable
         try
         {
             client.NoDelay = true;
-            // Connecting a DnsEndPoint by host name re-resolves it (so a peer's new IP is picked up);
-            // an IPEndPoint connects directly.
-            if (endpoint is DnsEndPoint dns)
-                await client.ConnectAsync(dns.Host, dns.Port, token).ConfigureAwait(false);
-            else
-                await client.ConnectAsync((IPEndPoint)endpoint, token).ConfigureAwait(false);
+            using var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            connectTimeout.CancelAfter(ConnectTimeout);
+            try
+            {
+                // Connecting a DnsEndPoint by host name re-resolves it (so a peer's new IP is picked up);
+                // an IPEndPoint connects directly.
+                if (endpoint is DnsEndPoint dns)
+                    await client.ConnectAsync(dns.Host, dns.Port, connectTimeout.Token).ConfigureAwait(false);
+                else
+                    await client.ConnectAsync((IPEndPoint)endpoint, connectTimeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                // The connect attempt (not the caller) timed out. Surface it as an ordinary failure so
+                // SubmitAsync's classifier maps it to RetryableForwardingException (the command was never
+                // sent), letting the submit loop re-resolve the leader on its next attempt.
+                throw new TimeoutException($"Connecting to the leader at {endpoint} timed out after {ConnectTimeout}.");
+            }
+
             return client;
         }
         catch

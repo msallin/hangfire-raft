@@ -17,7 +17,8 @@ internal sealed class RaftFetchedJob : IFetchedJob
     private readonly RaftStorageCluster _cluster;
     private readonly Guid _token;
     private readonly Timer _renewal;
-    private bool _completed;
+    // volatile: written on the worker thread (RemoveFromQueue/Requeue), read on the timer thread (Renew).
+    private volatile bool _completed;
     private volatile bool _disposed;
     private int _renewing;
 

@@ -690,15 +690,21 @@ public class RaftStoreTests
     }
 
     [Fact]
-    public void RequeueFetched_DoesNotReEnqueue_AnEvictedJob()
+    public void Maintenance_DoesNotEvict_AFetchedJob()
     {
+        // A job that expires WHILE held under a fetch lease must not be evicted out from under the
+        // worker; otherwise an ExpireJob racing an in-flight fetch would drop it with zero runs.
         Apply(T0, NewJob("a"), new EnqueueOp("q", "a"), new ExpireJobOp("a", T0.AddMinutes(1)));
         var token = Guid.NewGuid();
         Apply(T0, new FetchOp(["q"], token));
-        Apply(T0.AddMinutes(2), new MaintenanceOp(TimeSpan.FromMinutes(5))); // evicts "a" (expired), lease not yet stale
 
-        Apply(T0.AddMinutes(2), new RequeueFetchedOp(token)); // drops the lease; "a" is gone so it is not re-enqueued
-        Assert.Equal(0, _store.GetQueueLength("q"));
+        // Past the job's expiry, but the lease is still fresh: maintenance keeps the fetched job.
+        Apply(T0.AddMinutes(2), new MaintenanceOp(TimeSpan.FromMinutes(5)));
+        Assert.NotNull(_store.GetJob("a"));
+
+        // Releasing the lease re-enqueues it (the job still exists), so it can still run.
+        Apply(T0.AddMinutes(2), new RequeueFetchedOp(token));
+        Assert.Equal(1, _store.GetQueueLength("q"));
     }
 
     [Fact]
@@ -750,6 +756,145 @@ public class RaftStoreTests
         var other = new RaftStore();
         using (var reader = new BinaryReader(new MemoryStream(snapshot), Encoding.UTF8)) other.LoadSnapshot(reader);
         Assert.Equal(snapshot, Serialize(other)); // every zero-count table prefix round-trips
+    }
+
+    [Fact]
+    public void LoadSnapshot_Throws_OnTruncatedSnapshot()
+    {
+        Apply(T0, NewJob("a"), new EnqueueOp("q", "a"), new AddToSetOp("s", "v", 1));
+        var snapshot = Serialize(_store);
+        var truncated = snapshot[..^5]; // drop the tail mid-structure
+
+        var other = new RaftStore();
+        using var reader = new BinaryReader(new MemoryStream(truncated), Encoding.UTF8);
+        // A corrupt/partial snapshot must fail loudly (EndOfStream/InvalidData), not load partial state.
+        Assert.ThrowsAny<Exception>(() => other.LoadSnapshot(reader));
+    }
+
+    [Fact]
+    public void LoadSnapshot_Throws_OnOversizedCount()
+    {
+        using var ms = new MemoryStream();
+        using (var w = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true))
+        {
+            w.Write((byte)1);                    // valid snapshot version (matches RaftStore.SnapshotVersion)
+            w.Write7BitEncodedInt(int.MaxValue); // a jobs count far larger than the buffer
+        }
+        ms.Position = 0;
+
+        using var reader = new BinaryReader(ms, Encoding.UTF8);
+        // ReadCount must reject the hostile count before attempting a huge allocation.
+        Assert.Throws<InvalidDataException>(() => new RaftStore().LoadSnapshot(reader));
+    }
+
+    [Fact]
+    public void Snapshot_RoundtripsMultiEntryHistory_DistinctFromCurrentState()
+    {
+        // History holds three entries while CurrentState is the middle one (an AddJobState appends to
+        // history without changing the current state), so the snapshot must serialize the two
+        // independently rather than conflating "last history entry" with "current state".
+        Apply(T0, NewJob("a"));
+        Apply(T0, new SetJobStateOp("a", State("Enqueued", T0)));
+        Apply(T0, new SetJobStateOp("a", State("Processing", T0.AddSeconds(1))));
+        Apply(T0, new AddJobStateOp("a", State("Custom", T0.AddSeconds(2)))); // history-only
+
+        var restored = new RaftStore();
+        using (var reader = new BinaryReader(new MemoryStream(Serialize(_store)), Encoding.UTF8))
+            restored.LoadSnapshot(reader);
+
+        var job = restored.GetJob("a")!;
+        Assert.Equal(["Enqueued", "Processing", "Custom"], job.History.Select(s => s.Name));
+        Assert.Equal("Processing", job.CurrentState!.Name);       // current is the middle entry, not the last
+        Assert.Equal(1, restored.GetStateCount("Processing"));    // index rebuilt from CurrentState
+        Assert.Equal(0, restored.GetStateCount("Custom"));        // history-only entry is not indexed
+    }
+
+    [Fact]
+    public void Apply_SameCommandSequence_YieldsByteIdenticalState_OnIndependentStores()
+    {
+        // Determinism: applying the identical committed sequence to two independent stores must produce
+        // byte-identical state. A wall-clock read, Guid.NewGuid, or any ambient input sneaking into the
+        // apply path would make the two diverge and fail this.
+        var token1 = Guid.NewGuid();
+        var token2 = Guid.NewGuid();
+        var owner = Guid.NewGuid();
+        Command Cmd(DateTime now, params StoreOp[] ops) => new() { Id = Guid.NewGuid(), NowUtc = now, Ops = ops };
+        Command[] sequence =
+        [
+            Cmd(T0, new CreateJobOp("j1", "p1", [new("k", "v")], T0, T0.AddDays(1)), new CreateJobOp("j2", "p2", [], T0, T0.AddDays(1))),
+            Cmd(T0, new SetJobStateOp("j1", State("Enqueued", T0)), new EnqueueOp("default", "j1"), new EnqueueOp("default", "j2")),
+            Cmd(T0.AddSeconds(1), new FetchOp(["default"], token1)),
+            Cmd(T0.AddSeconds(2), new FetchOp(["default"], token2)),
+            Cmd(T0.AddSeconds(3), new RenewFetchedOp(token1)),
+            Cmd(T0, new AddToSetOp("s", "b", 2), new AddToSetOp("s", "a", 1), new AddToSetOp("s", "c", 2)),
+            Cmd(T0, new InsertToListOp("l", "1"), new InsertToListOp("l", "2"), new TrimListOp("l", 0, 5)),
+            Cmd(T0, new SetRangeInHashOp("h", [new("f1", "v1"), new("f2", null)])),
+            Cmd(T0, new IncrementCounterOp("c", 3, T0.AddHours(1)), new IncrementCounterOp("c", -1, null)),
+            Cmd(T0, new AnnounceServerOp("srv", 4, ["default"]), new TryAcquireLockOp("r", owner, TimeSpan.FromMinutes(2))),
+            Cmd(T0.AddSeconds(4), new RequeueFetchedOp(token2)),
+            Cmd(T0.AddMinutes(10), new MaintenanceOp(TimeSpan.FromMinutes(5))),
+        ];
+
+        var a = new RaftStore();
+        var b = new RaftStore();
+        foreach (var cmd in sequence)
+        {
+            a.Apply(cmd);
+            b.Apply(cmd);
+        }
+
+        Assert.Equal(Serialize(a), Serialize(b));
+    }
+
+    [Fact]
+    public void TryAcquireLock_AfterLosingToAnotherOwner_RenewReturnsFalse()
+    {
+        // The behavior RaftDistributedLock.RenewAsync relies on: once a lease has expired and another
+        // owner took it, the original owner's renewal must be denied (it must not steal the lock back).
+        var owner1 = Guid.NewGuid();
+        var owner2 = Guid.NewGuid();
+        var lease = TimeSpan.FromMinutes(2);
+
+        Assert.True((bool)Apply(T0, new TryAcquireLockOp("r", owner1, lease))!);
+        Assert.True((bool)Apply(T0.AddMinutes(3), new TryAcquireLockOp("r", owner2, lease))!); // owner1 expired
+        Assert.False((bool)Apply(T0.AddMinutes(3), new TryAcquireLockOp("r", owner1, lease))!); // owner2 holds a live lease
+    }
+
+    [Fact]
+    public void TrimList_BoundaryCases()
+    {
+        // Each list's newest-first view is 3,2,1.
+        Apply(T0, new InsertToListOp("neg", "1"), new InsertToListOp("neg", "2"), new InsertToListOp("neg", "3"));
+        Apply(T0, new TrimListOp("neg", -2, 1)); // negative start clamps to 0 -> keep indices 0..1
+        Assert.Equal(["3", "2"], _store.GetAllItemsFromList("neg"));
+
+        Apply(T0, new InsertToListOp("over", "1"), new InsertToListOp("over", "2"), new InsertToListOp("over", "3"));
+        Apply(T0, new TrimListOp("over", 1, 99)); // upper bound past the end -> keep 2,1
+        Assert.Equal(["2", "1"], _store.GetAllItemsFromList("over"));
+
+        Apply(T0, new InsertToListOp("one", "1"), new InsertToListOp("one", "2"), new InsertToListOp("one", "3"));
+        Apply(T0, new TrimListOp("one", 2, 2)); // keep exactly index 2
+        Assert.Equal(["1"], _store.GetAllItemsFromList("one"));
+    }
+
+    [Fact]
+    public void GetSetCount_WithLimit_NeverExceedsLimit_AndHandlesEdges()
+    {
+        Apply(T0, new AddRangeToSetOp("s1", ["a", "b", "c"]), new AddRangeToSetOp("s2", ["d", "e"])); // 5 total
+
+        Assert.Equal(0, _store.GetSetCount([], 100));            // no keys
+        Assert.Equal(0, _store.GetSetCount(["s1", "s2"], 0));    // limit 0
+        Assert.Equal(4, _store.GetSetCount(["s1", "s2"], 4));    // capped below the actual 5
+        Assert.Equal(5, _store.GetSetCount(["s1", "s2"], 100));  // actual, under the limit
+        Assert.True(_store.GetSetCount(["s1", "s2"], 4) <= 4);   // never exceeds the limit (HF-001 was a false positive)
+    }
+
+    [Fact]
+    public void GetRangeFromSet_EmptyWhenFromExceedsTo_OrKeyMissing()
+    {
+        Apply(T0, new AddToSetOp("s", "a", 1), new AddToSetOp("s", "b", 2));
+        Assert.Empty(_store.GetRangeFromSet("s", 5, 1));        // from > to
+        Assert.Empty(_store.GetRangeFromSet("missing", 0, 10)); // unknown key
     }
 
     private static byte[] Serialize(RaftStore store)

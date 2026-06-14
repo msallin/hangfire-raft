@@ -43,8 +43,23 @@ internal sealed class HangfireStateMachine : MemoryBasedStateMachine
         if (entry.IsSnapshot)
         {
             var snapshot = await ReadPayload(entry).ConfigureAwait(false);
-            using var reader = new BinaryReader(BinaryFormat.CreateReadStream(snapshot), Encoding.UTF8);
-            Store.LoadSnapshot(reader);
+            try
+            {
+                using var reader = new BinaryReader(BinaryFormat.CreateReadStream(snapshot), Encoding.UTF8);
+                Store.LoadSnapshot(reader);
+            }
+            catch (Exception ex)
+            {
+                // Unlike an undecodable command (skipped below), a corrupt snapshot cannot be skipped:
+                // the snapshot IS the base state, so continuing would bring the node up with silently
+                // missing/wrong data. Fail loudly with a typed, logged error instead of letting a raw
+                // reader exception (EndOfStream/InvalidData/NotSupported) fault the pipeline opaquely.
+                // Recovery is operational: restore or clear the WAL directory so the node re-syncs from
+                // the leader.
+                _logger.LogError(ex, "Failed to load the committed snapshot at index {Index}; the on-disk state is corrupt or from an incompatible version.", entry.Index);
+                throw new RaftStorageException($"Failed to load the Raft snapshot at index {entry.Index}; the on-disk state may be corrupt.", ex);
+            }
+
             return;
         }
 

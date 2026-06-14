@@ -127,4 +127,20 @@ public class CommandForwardingTests
         var read = await stream.ReadAsync(new byte[1]);
         Assert.Equal(0, read);
     }
+
+    [Fact]
+    public void IsRetryable_OnlyForProvablyNotAppendedFailures()
+    {
+        // This classification is the gate the submit loop uses to decide resend-or-wait. Retryable
+        // failures are those where the command provably never reached the log, so resending is safe.
+        Assert.True(RaftStorageCluster.IsRetryable(new NotLeaderResponseException()));
+        Assert.True(RaftStorageCluster.IsRetryable(new RetryableForwardingException("x", new IOException())));
+        Assert.True(RaftStorageCluster.IsRetryable(new TimeoutException()));
+
+        // An ambiguous outcome must NEVER be retried: a second committed copy of a non-idempotent op
+        // (e.g. a fetch) could lose a job. Unrelated failures are not blindly retried either.
+        Assert.False(RaftStorageCluster.IsRetryable(new AmbiguousCommandException("x")));
+        Assert.False(RaftStorageCluster.IsRetryable(new InvalidOperationException()));
+        Assert.False(RaftStorageCluster.IsRetryable(new RaftStorageException("x")));
+    }
 }

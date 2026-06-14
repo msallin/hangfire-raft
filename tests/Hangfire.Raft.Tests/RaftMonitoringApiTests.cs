@@ -217,25 +217,28 @@ public class RaftMonitoringApiTests
     // ----- date-bucket graphs -----
 
     [Fact]
-    public void SucceededByDatesCount_ReadsSevenDailyBuckets()
+    public void DailyCounts_ReadsSevenDailyBuckets()
     {
-        var today = DateTime.UtcNow.Date;
+        // A fixed instant so the seeded key and the read bucket share one timestamp; reading via the
+        // clock-parameterized overload removes the midnight-boundary race the public method would have.
+        var now = new DateTime(2026, 6, 12, 9, 0, 0, DateTimeKind.Utc);
+        var today = now.Date;
         Apply(new IncrementCounterOp($"stats:succeeded:{today:yyyy-MM-dd}", 7, null));
 
-        var byDate = _api.SucceededByDatesCount();
+        var byDate = _api.DailyCounts("succeeded", now);
         Assert.Equal(7, byDate.Count); // one bucket per day for a week
         Assert.Equal(7, byDate[today]);
         Assert.Equal(0, byDate[today.AddDays(-3)]);
     }
 
     [Fact]
-    public void HourlyFailedJobs_ReadsTwentyFourHourlyBuckets()
+    public void HourlyCounts_ReadsTwentyFourHourlyBuckets()
     {
-        var now = DateTime.UtcNow;
+        var now = new DateTime(2026, 6, 12, 9, 30, 0, DateTimeKind.Utc);
         var hour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc);
         Apply(new IncrementCounterOp($"stats:failed:{hour:yyyy-MM-dd-HH}", 3, null));
 
-        var byHour = _api.HourlyFailedJobs();
+        var byHour = _api.HourlyCounts("failed", now);
         Assert.Equal(24, byHour.Count);
         Assert.Equal(3, byHour[hour]);
     }

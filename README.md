@@ -63,14 +63,16 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
   for storages with this property.
 * **Fetching a job is a consensus operation**, so a job is handed to exactly one worker across
   the whole cluster. Fetched jobs are held under a lease that the worker renews in the
-  background; if a node dies mid-processing, the lease expires and maintenance requeues the
-  job after `FetchInvisibilityTimeout` (at-least-once execution, same model as the SQL
-  storage's sliding invisibility timeout).
+  background; if a node dies mid-processing, the lease expires and the next leader maintenance
+  pass requeues the job (so after `FetchInvisibilityTimeout` plus up to `MaintenanceInterval`,
+  and only while a leader has quorum) — at-least-once execution, the same model as the SQL
+  storage's sliding invisibility timeout.
 * **Distributed locks** are replicated leases renewed by the holder. A crashed holder's lock
   frees itself when the lease expires.
 * **Time**: the state machine never reads the local clock. Every command carries the
-  submitter's UTC timestamp, so all replicas stay byte-identical. Keep node clocks reasonably
-  synchronized (NTP) because expirations compare those timestamps.
+  submitter's UTC timestamp, so every replica applies the same updates and converges to the
+  same logical state (snapshot byte streams may differ in map ordering; the replicated data does
+  not). Keep node clocks reasonably synchronized (NTP) because expirations compare those timestamps.
 * **Durability**: every node persists the log to `WalPath` and periodically compacts it into
   snapshots. On restart a node replays snapshot + log before serving, then catches up from
   the leader.
@@ -87,7 +89,7 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
 | `RpcPortOffset` | `1` | Forwarding port = Raft port + offset. |
 | `SubmitTimeout` | 30 s | Max time for a single write (replication + local apply). |
 | `LockLeaseTimeout` | 2 min | Distributed lock lease; renewed at a third of it. |
-| `FetchInvisibilityTimeout` | 5 min | Crashed worker's job becomes fetchable again after this. |
+| `FetchInvisibilityTimeout` | 5 min | A crashed worker's job becomes fetchable again on the first maintenance pass after this (so up to `+ MaintenanceInterval`, and only with quorum). |
 | `MaintenanceInterval` | 30 s | Leader cleanup cadence. |
 | `LowerElectionTimeoutMs` / `UpperElectionTimeoutMs` | 1500 / 3000 | Raft election timeouts. |
 | `LoggerFactory` | none | Diagnostics for the cluster and storage. |

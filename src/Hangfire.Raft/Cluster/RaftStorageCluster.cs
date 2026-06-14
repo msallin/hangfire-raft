@@ -40,6 +40,13 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     /// <summary>True when this node currently believes itself to be the cluster leader.</summary>
     public bool IsLeader => _cluster.Leader is { IsRemote: false };
 
+    /// <summary>
+    /// True when the cluster currently has a leader this node can submit to (itself or a remote).
+    /// A cheap probe the fetch loop uses to avoid starting a write that would only block until the
+    /// submit timeout when there is no quorum.
+    /// </summary>
+    public bool HasLeader => _cluster.Leader is not null;
+
     /// <summary>Point-in-time view of cluster health for readiness/liveness checks.</summary>
     public RaftClusterHealth GetHealth()
     {
@@ -155,10 +162,22 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                     }
 
                     var entry = _stateMachine.CreateCommandEntry(payload);
-                    if (await _cluster.ReplicateAsync(entry, linked).ConfigureAwait(false)) break;
+                    try
+                    {
+                        // true: committed. false: the entry was appended but the commit outcome is
+                        // unknown (leadership changed mid-replication). Either way stop sending and let
+                        // the local apply waiter return the result (or time out).
+                        await _cluster.ReplicateAsync(entry, linked).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException && !IsRetryable(ex))
+                    {
+                        // The entry was appended before this throw, so it may still commit. Mirror the
+                        // forward path (HandleForwardedCommand): a flat failure here would let Hangfire
+                        // retry into a possible double-apply of a non-idempotent op (a leader-local fetch
+                        // or counter increment), so defer to the local apply waiter instead of rethrowing.
+                        _logger.LogWarning(ex, "Local replication of command {CommandId} threw after append; treating the outcome as ambiguous and waiting for the local apply.", command.Id);
+                    }
 
-                    // false: the entry was appended but the commit outcome is unknown (leadership
-                    // changed mid-replication) -> ambiguous, fall through to the waiter.
                     break;
                 }
                 catch (AmbiguousCommandException ex)
@@ -205,7 +224,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     /// rather than via their <c>InvalidOperationException</c> base so that other IOE-shaped failures
     /// (e.g. ObjectDisposedException during shutdown) are not silently retried for the full timeout.
     /// </summary>
-    private static bool IsRetryable(Exception ex) => ex is NotLeaderResponseException
+    internal static bool IsRetryable(Exception ex) => ex is NotLeaderResponseException
         or RetryableForwardingException
         or NotLeaderException
         or TimeoutException;
@@ -240,9 +259,14 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             return (ForwardingProtocol.StatusError, "command rejected");
         }
 
+        // Bound the replicate by the same budget the submitter gives its own writes. Without this the
+        // replicate is bounded only by node lifetime, so under quorum loss an entry the follower already
+        // abandoned (its SubmitTimeout elapsed) would keep a pending replicate alive on the leader.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(_options.SubmitTimeout);
         try
         {
-            return await _cluster.ReplicateAsync(entry, token).ConfigureAwait(false)
+            return await _cluster.ReplicateAsync(entry, deadline.Token).ConfigureAwait(false)
                 ? (ForwardingProtocol.StatusOk, null)
                 : (ForwardingProtocol.StatusAmbiguous, "replication did not complete");
         }
@@ -255,14 +279,18 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         catch (Exception)
         {
             // From here the entry may already sit in the log; only the submitter's local apply can
-            // tell whether it committed. Detail stays local rather than leaking to the caller.
+            // tell whether it committed (this includes hitting the deadline above). Detail stays local
+            // rather than leaking to the caller.
             return (ForwardingProtocol.StatusAmbiguous, "outcome unknown");
         }
     }
 
     /// <summary>
-    /// Leader-only periodic cleanup. Every node runs the loop, but only the current leader submits,
-    /// so the cluster performs maintenance exactly once per interval regardless of size.
+    /// Leader-only periodic cleanup. Every node runs the loop, but only the current leader submits, so
+    /// the cluster performs maintenance approximately once per interval regardless of size. A leadership
+    /// change can run it twice for one interval; that is harmless because maintenance is convergent
+    /// (re-eviction is idempotent and already-requeued fetches are gone), applied identically on every
+    /// replica from the command's envelope time.
     /// </summary>
     private async Task MaintenanceLoop()
     {

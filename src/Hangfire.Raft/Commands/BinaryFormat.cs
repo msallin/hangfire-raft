@@ -84,6 +84,10 @@ internal static class BinaryFormat
     /// larger than the remaining length is corrupt or hostile; without this guard a tiny payload
     /// claiming count=int.MaxValue would drive a multi-gigabyte array allocation on every applying
     /// node. Callers must read from a seekable stream (the command and snapshot readers do).
+    /// This guards collection prefixes that drive an up-front allocation; <see cref="BinaryReader.ReadString"/>
+    /// has its own 7-bit length prefix but reads in fixed-size chunks (no pre-allocation from the
+    /// prefix), so a hostile string length fails with EndOfStreamException rather than an OOM and does
+    /// not need to pass through here.
     /// </summary>
     public static int ReadCount(BinaryReader r)
     {

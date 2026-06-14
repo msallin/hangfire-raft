@@ -11,7 +11,13 @@ internal sealed class StoreSignals
     private readonly Dictionary<string, PulseSource> _queues = [];
     private readonly PulseSource _locks = new();
 
-    /// <summary>Returns a task that completes when any of the given queues receives a pulse.</summary>
+    /// <summary>
+    /// Returns a task that completes when any of the given queues receives a pulse. The fetch loop also
+    /// caps its wait (~1s) and re-probes, so a missed pulse only delays a poll. Per-queue sources are
+    /// kept deliberately: a single coarse "something enqueued" pulse would wake every fetch loop on
+    /// every cross-queue enqueue (a wake-up storm under multi-queue load), which costs more than the
+    /// bounded transient continuations a repeatedly-polled idle queue holds until its next pulse.
+    /// </summary>
     public Task WaitForQueues(IReadOnlyList<string> queues)
     {
         lock (_sync)

@@ -54,7 +54,11 @@ internal sealed class RaftStorageConnection(RaftJobStorage storage) : JobStorage
             Cluster.FetchGate.Wait(cancellationToken);
             try
             {
-                if (Cluster.Store.HasQueuedJob(queues))
+                // Only submit when there is a job AND a leader to commit the fetch. Without the leader
+                // check, during a leader/quorum outage every worker would take the gate in turn and
+                // block it for a full SubmitTimeout, serializing all fetch workers behind doomed writes;
+                // here they fall through to the bounded wait below and re-probe once a leader returns.
+                if (Cluster.HasLeader && Cluster.Store.HasQueuedJob(queues))
                 {
                     var token = Guid.NewGuid();
                     var result = Cluster.Submit(Command.Single(new FetchOp(queues, token)), cancellationToken);
