@@ -104,111 +104,145 @@ internal sealed partial class RaftStore
         }
     }
 
-    /// <summary>Replaces the entire store content in place, so existing references stay valid.</summary>
+    /// <summary>
+    /// Replaces the entire store content in place, so existing references stay valid. The snapshot is
+    /// parsed into a throwaway store first, so a corrupt or truncated stream throws before the live
+    /// store is touched and readers never observe a half-loaded store. Only a fully parsed snapshot is
+    /// swapped in, and the swap runs under the store lock and cannot throw.
+    /// </summary>
     public void LoadSnapshot(BinaryReader r)
     {
+        var loaded = new RaftStore();
+        loaded.ReadSnapshot(r);
+
         lock (_sync)
         {
-            var version = r.ReadByte();
-            if (version != SnapshotVersion) throw new NotSupportedException($"Unknown snapshot version {version}.");
+            ReplaceContentsWith(loaded);
+        }
+    }
 
-            _jobs.Clear();
-            _queues.Clear();
-            _fetched.Clear();
-            _sets.Clear();
-            _lists.Clear();
-            _hashes.Clear();
-            _counters.Clear();
-            _servers.Clear();
-            _locks.Clear();
-            _jobsByState.Clear();
+    /// <summary>
+    /// Deserializes a snapshot into this store, which is assumed empty (a throwaway instance created by
+    /// <see cref="LoadSnapshot"/>). A malformed stream throws here, before any caller can observe the
+    /// instance, which is what keeps the load all-or-nothing.
+    /// </summary>
+    private void ReadSnapshot(BinaryReader r)
+    {
+        var version = r.ReadByte();
+        if (version != SnapshotVersion) throw new NotSupportedException($"Unknown snapshot version {version}.");
 
-            for (var count = ReadCount(r); count > 0; count--)
+        for (var count = ReadCount(r); count > 0; count--)
+        {
+            var id = r.ReadString();
+            var job = new JobEntry
             {
-                var id = r.ReadString();
-                var job = new JobEntry
-                {
-                    Id = id,
-                    InvocationData = r.ReadString(),
-                    CreatedAt = ReadDate(r),
-                    ExpireAt = ReadNullableDate(r),
-                };
-                foreach (var (key, value) in ReadPairs(r)) job.Parameters[key] = value;
-                for (var states = ReadCount(r); states > 0; states--) job.History.Add(ReadState(r));
-                if (r.ReadBoolean())
-                {
-                    job.CurrentState = ReadState(r);
-                    job.StateChangedAt = job.CurrentState.CreatedAt;
-                }
-                _jobs[id] = job;
-                AddToStateIndex(job);
-            }
-
-            for (var count = ReadCount(r); count > 0; count--)
+                Id = id,
+                InvocationData = r.ReadString(),
+                CreatedAt = ReadDate(r),
+                ExpireAt = ReadNullableDate(r),
+            };
+            foreach (var (key, value) in ReadPairs(r)) job.Parameters[key] = value;
+            for (var states = ReadCount(r); states > 0; states--) job.History.Add(ReadState(r));
+            if (r.ReadBoolean())
             {
-                var queue = Queue(r.ReadString());
-                for (var items = ReadCount(r); items > 0; items--) queue.AddLast(r.ReadString());
+                job.CurrentState = ReadState(r);
+                job.StateChangedAt = job.CurrentState.CreatedAt;
             }
+            _jobs[id] = job;
+            AddToStateIndex(job);
+        }
 
-            for (var count = ReadCount(r); count > 0; count--)
-            {
-                var token = ReadGuid(r);
-                _fetched[token] = new FetchedEntry { JobId = r.ReadString(), Queue = r.ReadString(), FetchedAt = ReadDate(r) };
-            }
+        for (var count = ReadCount(r); count > 0; count--)
+        {
+            var queue = Queue(r.ReadString());
+            for (var items = ReadCount(r); items > 0; items--) queue.AddLast(r.ReadString());
+        }
 
-            for (var count = ReadCount(r); count > 0; count--)
-            {
-                var key = r.ReadString();
-                var set = new SetEntry { ExpireAt = ReadNullableDate(r) };
-                _sets[key] = set;
-                for (var items = ReadCount(r); items > 0; items--)
-                {
-                    var value = r.ReadString();
-                    var score = r.ReadDouble();
-                    set.Scores[value] = score;
-                    set.Sorted.Add(new SetItem(score, value));
-                }
-            }
+        for (var count = ReadCount(r); count > 0; count--)
+        {
+            var token = ReadGuid(r);
+            _fetched[token] = new FetchedEntry { JobId = r.ReadString(), Queue = r.ReadString(), FetchedAt = ReadDate(r) };
+        }
 
-            for (var count = ReadCount(r); count > 0; count--)
+        for (var count = ReadCount(r); count > 0; count--)
+        {
+            var key = r.ReadString();
+            var set = new SetEntry { ExpireAt = ReadNullableDate(r) };
+            _sets[key] = set;
+            for (var items = ReadCount(r); items > 0; items--)
             {
-                var key = r.ReadString();
-                var list = new ListEntry { ExpireAt = ReadNullableDate(r) };
-                _lists[key] = list;
-                list.Items.AddRange(ReadStrings(r));
+                var value = r.ReadString();
+                var score = r.ReadDouble();
+                set.Scores[value] = score;
+                set.Sorted.Add(new SetItem(score, value));
             }
+        }
 
-            for (var count = ReadCount(r); count > 0; count--)
-            {
-                var key = r.ReadString();
-                var hash = new HashEntry { ExpireAt = ReadNullableDate(r) };
-                _hashes[key] = hash;
-                foreach (var (field, value) in ReadPairs(r)) hash.Fields[field] = value;
-            }
+        for (var count = ReadCount(r); count > 0; count--)
+        {
+            var key = r.ReadString();
+            var list = new ListEntry { ExpireAt = ReadNullableDate(r) };
+            _lists[key] = list;
+            list.Items.AddRange(ReadStrings(r));
+        }
 
-            for (var count = ReadCount(r); count > 0; count--)
-            {
-                var key = r.ReadString();
-                _counters[key] = new CounterEntry { Value = r.ReadInt64(), ExpireAt = ReadNullableDate(r) };
-            }
+        for (var count = ReadCount(r); count > 0; count--)
+        {
+            var key = r.ReadString();
+            var hash = new HashEntry { ExpireAt = ReadNullableDate(r) };
+            _hashes[key] = hash;
+            foreach (var (field, value) in ReadPairs(r)) hash.Fields[field] = value;
+        }
 
-            for (var count = ReadCount(r); count > 0; count--)
-            {
-                var id = r.ReadString();
-                _servers[id] = new ServerEntry
-                {
-                    WorkerCount = r.ReadInt32(),
-                    Queues = ReadStrings(r),
-                    StartedAt = ReadDate(r),
-                    LastHeartbeat = ReadDate(r),
-                };
-            }
+        for (var count = ReadCount(r); count > 0; count--)
+        {
+            var key = r.ReadString();
+            _counters[key] = new CounterEntry { Value = r.ReadInt64(), ExpireAt = ReadNullableDate(r) };
+        }
 
-            for (var count = ReadCount(r); count > 0; count--)
+        for (var count = ReadCount(r); count > 0; count--)
+        {
+            var id = r.ReadString();
+            _servers[id] = new ServerEntry
             {
-                var resource = r.ReadString();
-                _locks[resource] = new LockEntry { Owner = ReadGuid(r), ExpiresAt = ReadDate(r) };
-            }
+                WorkerCount = r.ReadInt32(),
+                Queues = ReadStrings(r),
+                StartedAt = ReadDate(r),
+                LastHeartbeat = ReadDate(r),
+            };
+        }
+
+        for (var count = ReadCount(r); count > 0; count--)
+        {
+            var resource = r.ReadString();
+            _locks[resource] = new LockEntry { Owner = ReadGuid(r), ExpiresAt = ReadDate(r) };
+        }
+    }
+
+    /// <summary>
+    /// Swaps another store's contents into this one under the caller-held lock. A pure in-memory copy
+    /// that cannot throw, so from a reader's perspective the snapshot load is atomic. The source is a
+    /// throwaway instance, so handing over its collection contents (including the freshly built state
+    /// index, which references the same job entries) is safe.
+    /// </summary>
+    private void ReplaceContentsWith(RaftStore other)
+    {
+        Replace(_jobs, other._jobs);
+        Replace(_queues, other._queues);
+        Replace(_fetched, other._fetched);
+        Replace(_sets, other._sets);
+        Replace(_lists, other._lists);
+        Replace(_hashes, other._hashes);
+        Replace(_counters, other._counters);
+        Replace(_servers, other._servers);
+        Replace(_locks, other._locks);
+        Replace(_jobsByState, other._jobsByState);
+
+        static void Replace<TKey, TValue>(Dictionary<TKey, TValue> target, Dictionary<TKey, TValue> source)
+            where TKey : notnull
+        {
+            target.Clear();
+            foreach (var (key, value) in source) target[key] = value;
         }
     }
 }

@@ -772,6 +772,35 @@ public class RaftStoreTests
     }
 
     [Fact]
+    public void LoadSnapshot_LeavesExistingStateIntact_WhenIncomingSnapshotIsCorrupt()
+    {
+        // CC-001: a failed load is atomic. Populate the store, then feed it a truncated snapshot taken
+        // from a different state. The incoming bytes are parsed into a throwaway store and only swapped
+        // in on success, so after the load throws the live store must be byte-identical to before, never
+        // half-wiped nor partially overwritten with the incoming data.
+        Apply(T0,
+            NewJob("keep"), new SetJobStateOp("keep", State("Succeeded", T0)),
+            new EnqueueOp("default", "keep"),
+            new AddToSetOp("s", "v", 1),
+            new IncrementCounterOp("c", 3, null));
+        var baseline = Serialize(_store);
+
+        var incoming = new RaftStore();
+        incoming.Apply(new Command
+        {
+            Id = Guid.NewGuid(),
+            NowUtc = T0,
+            Ops = [NewJob("other"), new EnqueueOp("q2", "other"), new AddToSetOp("s2", "w", 2)],
+        });
+        var corrupt = Serialize(incoming)[..^5]; // drop the tail mid-structure so the load fails partway
+
+        using (var reader = new BinaryReader(new MemoryStream(corrupt), Encoding.UTF8))
+            Assert.ThrowsAny<Exception>(() => _store.LoadSnapshot(reader));
+
+        Assert.Equal(baseline, Serialize(_store)); // the live store survived the failed load intact
+    }
+
+    [Fact]
     public void LoadSnapshot_Throws_OnOversizedCount()
     {
         using var ms = new MemoryStream();
