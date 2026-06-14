@@ -96,11 +96,14 @@ internal sealed class RaftFetchedJob : IFetchedJob
     {
         if (_disposed) return;
         _disposed = true;
-        _renewal.Dispose();
 
+        // Requeue (when neither acked nor explicitly requeued) BEFORE disposing the renewal timer, so a
+        // disposed-but-unacked job becomes visible again immediately instead of only after the lease
+        // expires. Requeue() stops the timer via _renewal.Change, and calling Change on an already
+        // disposed timer is not a guaranteed clean no-op across runtimes, so the order matters.
         // No need to drain an in-flight async renewal here (unlike the distributed lock): RenewFetchedOp
-        // is update-only, so once Requeue/RemoveFromQueue removes the lease a late renewal is a no-op
-        // and cannot resurrect it. Either commit order leaves the job requeued with no lingering lease.
+        // is update-only, so once Requeue removes the lease a late renewal is a no-op and cannot
+        // resurrect it.
         if (!_completed)
         {
             try
@@ -112,5 +115,7 @@ internal sealed class RaftFetchedJob : IFetchedJob
                 // The invisibility timeout reclaims the job if the requeue cannot reach the cluster.
             }
         }
+
+        _renewal.Dispose();
     }
 }

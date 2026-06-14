@@ -18,10 +18,12 @@ internal sealed class Command
         Ops = [op],
     };
 
+    // Copies the caller's list so the replicated envelope stays immutable even if the caller keeps
+    // mutating the original collection after the command is created.
     public static Command Batch(IReadOnlyList<StoreOp> ops) => new()
     {
         Id = Guid.NewGuid(),
         NowUtc = DateTime.UtcNow,
-        Ops = ops,
+        Ops = ops.ToArray(),
     };
 }

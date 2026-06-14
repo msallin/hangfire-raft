@@ -40,15 +40,42 @@ internal sealed class RaftDistributedLock : IDisposable
 
         while (true)
         {
-            var released = cluster.Signals.LockReleased; // capture before the attempt to avoid missing a release
-            var acquired = (bool)cluster.Submit(Command.Single(new TryAcquireLockOp(resource, owner, cluster.Options.LockLeaseTimeout)))!;
-            if (acquired) return new RaftDistributedLock(cluster, resource, owner);
-
+            // Check the deadline before each attempt (not only after) so an expired timeout fails fast
+            // instead of paying for one more submit, and bound the attempt itself by the time left so a
+            // short timeout is honored during an outage rather than blocking for the full SubmitTimeout.
             var remaining = deadline - DateTime.UtcNow;
             if (remaining <= TimeSpan.Zero) throw new DistributedLockTimeoutException(resource);
 
+            var released = cluster.Signals.LockReleased; // capture before the attempt to avoid missing a release
+            if (TryAcquireOnce(cluster, resource, owner, remaining))
+                return new RaftDistributedLock(cluster, resource, owner);
+
             var wait = remaining < TimeSpan.FromMilliseconds(200) ? remaining : TimeSpan.FromMilliseconds(200);
             released.Wait(wait);
+        }
+    }
+
+    private static bool TryAcquireOnce(RaftStorageCluster cluster, string resource, Guid owner, TimeSpan remaining)
+    {
+        var op = Command.Single(new TryAcquireLockOp(resource, owner, cluster.Options.LockLeaseTimeout));
+
+        // When the remaining budget is at least a full submit timeout, the submit's own timeout already
+        // bounds the attempt, so submit unbounded (preserving the prior behavior). Otherwise cap the
+        // attempt at the remaining budget so the caller's short timeout is respected even while the
+        // cluster is unavailable. A submit that never reaches a leader is not appended, so cancelling it
+        // cannot leave a half-applied lock; the narrow case where the entry was appended just before the
+        // cancel resolves itself once the lease expires.
+        if (remaining >= cluster.Options.SubmitTimeout)
+            return (bool)cluster.Submit(op)!;
+
+        using var attempt = new CancellationTokenSource(remaining);
+        try
+        {
+            return (bool)cluster.Submit(op, attempt.Token)!;
+        }
+        catch (OperationCanceledException)
+        {
+            throw new DistributedLockTimeoutException(resource);
         }
     }
 

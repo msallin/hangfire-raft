@@ -120,10 +120,20 @@ public sealed class RaftStorageOptions
     internal static IPAddress BindAddressFor(EndPoint endpoint) => endpoint is IPEndPoint ip ? ip.Address : IPAddress.Any;
 
     /// <summary>Derives the forwarding endpoint (Raft port + offset), preserving the address form.</summary>
-    internal static EndPoint RpcEndpoint(EndPoint raftEndpoint, int offset) => raftEndpoint switch
+    internal static EndPoint RpcEndpoint(EndPoint raftEndpoint, int offset)
     {
-        IPEndPoint ip => new IPEndPoint(ip.Address, ip.Port + offset),
-        DnsEndPoint dns => new DnsEndPoint(dns.Host, dns.Port + offset, dns.AddressFamily),
-        _ => throw new NotSupportedException($"Unsupported endpoint type {raftEndpoint.GetType()}."),
-    };
+        // Validate the combined port up front so a too-large RpcPortOffset fails with a message that
+        // names the offset, rather than a bare ArgumentOutOfRangeException from the endpoint constructor.
+        var rpcPort = PortOf(raftEndpoint) + offset;
+        if (rpcPort is < 0 or > 65535)
+            throw new InvalidOperationException(
+                $"Forwarding port {rpcPort} (Raft port {PortOf(raftEndpoint)} + RpcPortOffset {offset}) is outside the valid range 0-65535.");
+
+        return raftEndpoint switch
+        {
+            IPEndPoint ip => new IPEndPoint(ip.Address, rpcPort),
+            DnsEndPoint dns => new DnsEndPoint(dns.Host, rpcPort, dns.AddressFamily),
+            _ => throw new NotSupportedException($"Unsupported endpoint type {raftEndpoint.GetType()}."),
+        };
+    }
 }

@@ -5,8 +5,8 @@ namespace Hangfire.Raft.Tests;
 
 /// <summary>
 /// Failure-path coverage for the wire format. These guards are what let HangfireStateMachine.ApplyAsync
-/// safely skip an undecodable committed entry instead of faulting (and bricking) the apply pipeline,
-/// and what bounds allocation against a hostile length prefix.
+/// detect an undecodable committed entry and fail fast (so the node re-syncs from the leader) rather
+/// than silently diverging, and what bounds allocation against a hostile length prefix.
 /// </summary>
 public class CommandSerializerFailureTests
 {

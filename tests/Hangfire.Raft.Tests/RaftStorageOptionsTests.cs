@@ -49,6 +49,16 @@ public class RaftStorageOptionsTests
         Assert.Equal(5001, dns.Port);
     }
 
+    [Theory]
+    [InlineData(65000, 1000)] // 66000 overflows the 0-65535 port range
+    [InlineData(5000, -6000)] // negative result
+    public void RpcEndpoint_Throws_WhenOffsetPushesPortOutOfRange(int raftPort, int offset)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => RaftStorageOptions.RpcEndpoint(new DnsEndPoint("node", raftPort), offset));
+        Assert.Contains("RpcPortOffset", ex.Message); // message names the offending option
+    }
+
     [Fact]
     public void BindAddressFor_UsesLiteralIp_OrAnyForHostNames()
     {

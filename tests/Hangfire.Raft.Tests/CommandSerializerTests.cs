@@ -120,4 +120,17 @@ public class CommandSerializerTests
         Assert.Null(CommandSerializer.TryDeserialize(ReadOnlyMemory<byte>.Empty));
         Assert.Null(CommandSerializer.TryDeserialize(new byte[] { 0x00, 0x01, 0x02 }));
     }
+
+    [Fact]
+    public void Batch_SnapshotsOps_SoLaterMutationOfTheSourceListCannotChangeTheCommand()
+    {
+        var source = new List<StoreOp> { new PersistJobOp("a"), new PersistJobOp("b") };
+        var command = Command.Batch(source);
+
+        source.Add(new PersistJobOp("c")); // mutate the caller's list after creating the command
+        source[0] = new PersistJobOp("mutated");
+
+        Assert.Equal(2, command.Ops.Count); // the envelope kept its own copy
+        Assert.Equal("a", Assert.IsType<PersistJobOp>(command.Ops[0]).JobId);
+    }
 }

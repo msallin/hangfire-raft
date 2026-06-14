@@ -124,6 +124,10 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     /// and lets the apply waiter decide: if the command was committed after all, the local apply
     /// completes the waiter, otherwise the timeout surfaces an error. Resending an ambiguous
     /// command could apply a non-idempotent op (such as a fetch) twice and lose jobs.
+    /// The send phase and the post-append wait for the local apply each get their own SubmitTimeout
+    /// budget, so a command that did commit is not falsely failed just because reaching the leader was
+    /// slow; a post-append timeout is then surfaced as a distinct (ambiguous) error rather than as the
+    /// always-safe-to-retry "no leader" timeout.
     /// </summary>
     public async Task<object?> SubmitAsync(Command command, CancellationToken token = default)
     {
@@ -136,6 +140,9 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         var linked = timeout.Token;
 
         var waiter = _stateMachine.Waiters.Register(command.Id);
+        // True once the command has been handed to the cluster (replicated locally or forwarded), after
+        // which a timeout is ambiguous (it may already be committed) rather than safe to retry.
+        var appended = false;
         try
         {
             var payload = CommandSerializer.Serialize(command);
@@ -158,6 +165,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                         // rescheduled leader is reached at its new IP without a restart).
                         var rpcEndpoint = RaftStorageOptions.RpcEndpoint(leader.EndPoint, _options.RpcPortOffset);
                         await _forwardingClient.SubmitAsync(rpcEndpoint, payload, linked).ConfigureAwait(false);
+                        appended = true;
                         break; // acknowledged as committed
                     }
 
@@ -180,11 +188,13 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                         _logger.LogWarning(ex, "Local replication of command {CommandId} threw after append; treating the outcome as ambiguous and waiting for the local apply.", command.Id);
                     }
 
+                    appended = true;
                     break;
                 }
                 catch (AmbiguousCommandException ex)
                 {
                     _logger.LogWarning(ex, "Command {CommandId} outcome is ambiguous; waiting for the local apply to decide.", command.Id);
+                    appended = true;
                     break;
                 }
                 catch (Exception ex) when (IsRetryable(ex) && !linked.IsCancellationRequested)
@@ -194,13 +204,22 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                 }
             }
 
+            // The command has now been handed to the cluster; from here we only wait for THIS node's
+            // apply. Give that wait its own full budget instead of the leftover send budget, so a command
+            // that did commit is not falsely reported as failed just because reaching the leader was slow.
+            if (appended) timeout.CancelAfter(_options.SubmitTimeout);
             return await waiter.WaitAsync(linked).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         {
-            throw _lifetime.IsCancellationRequested
-                ? new RaftStorageException("The storage is shutting down.")
-                : new RaftStorageException($"The storage write did not complete within {_options.SubmitTimeout}. The cluster may have no leader or no quorum.");
+            if (_lifetime.IsCancellationRequested) throw new RaftStorageException("The storage is shutting down.");
+
+            // A timeout AFTER the command was handed to the cluster is ambiguous: it may already be
+            // committed, so it is surfaced distinctly from a pre-append timeout (no leader / no quorum),
+            // which never reached the log and is always safe to retry.
+            throw appended
+                ? new RaftStorageException($"The storage write for command {command.Id} was submitted but its local apply did not complete within {_options.SubmitTimeout}; the command may already be committed (ambiguous outcome).")
+                : new RaftStorageException($"The storage write did not reach a leader within {_options.SubmitTimeout}. The cluster may have no leader or no quorum.");
         }
         catch (Exception ex) when (ex is not (RaftStorageException or OperationCanceledException))
         {

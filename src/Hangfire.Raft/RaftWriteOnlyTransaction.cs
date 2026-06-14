@@ -30,7 +30,7 @@ internal sealed class RaftWriteOnlyTransaction(RaftJobStorage storage) : JobStor
         if (_committed) throw new InvalidOperationException("The transaction was already committed.");
         _committed = true;
         if (_ops.Count == 0) return;
-        storage.Cluster.Submit(Command.Batch(_ops.ToArray()));
+        storage.Cluster.Submit(Command.Batch(_ops)); // Batch snapshots the list, so no defensive copy is needed here
     }
 
     // ----- jobs -----

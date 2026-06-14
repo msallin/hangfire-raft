@@ -74,15 +74,17 @@ internal sealed class HangfireStateMachine : MemoryBasedStateMachine
         }
         catch (Exception ex)
         {
-            // A committed entry that carries our magic but cannot be decoded (corruption on disk, or
-            // an op from a newer command format reaching an older node during a version-skewed
-            // upgrade) must NOT fault the apply pipeline: that would crash every node and, via replay
-            // on restart, brick the whole cluster. The decode result is a deterministic function of
-            // the bytes, so every node skips the same entry identically. The leader also rejects
-            // undecodable commands before append (see HandleForwardedCommand), so reaching here means
-            // either local corruption or genuine version skew.
-            _logger.LogError(ex, "Skipping an undecodable committed log entry at index {Index}.", entry.Index);
-            return;
+            // A committed entry that carries our magic but cannot be decoded means this node's copy of
+            // an already-agreed entry is unusable: either the on-disk bytes are corrupt, or a node on an
+            // older build is replaying an op a newer one wrote. Skipping it is NOT safe here, unlike a
+            // best-effort cache: this entry is committed, so other nodes applied it. Silently dropping it
+            // would leave this replica permanently behind the log, serving stale reads and folding the
+            // divergence into the next snapshot it builds. Fail loudly instead (same recovery as a corrupt
+            // snapshot: restore or clear this node's WAL so it re-syncs from the leader). The leader
+            // pre-validates decodability before append (see HandleForwardedCommand) and authors its own
+            // entries from valid commands, so a healthy same-version cluster never reaches here.
+            _logger.LogError(ex, "Failed to decode the committed log entry at index {Index}; the on-disk state is corrupt or from an incompatible version.", entry.Index);
+            throw new RaftStorageException($"Failed to decode the committed Raft log entry at index {entry.Index}; the on-disk state may be corrupt or from an incompatible version.", ex);
         }
 
         if (command is null) return; // not one of ours (e.g. Raft bookkeeping entry)
