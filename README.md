@@ -1,5 +1,9 @@
 # Hangfire.Raft
 
+[![CI](https://github.com/msallin/hangfire-raft/actions/workflows/ci.yml/badge.svg)](https://github.com/msallin/hangfire-raft/actions/workflows/ci.yml)
+[![NuGet](https://img.shields.io/nuget/v/Hangfire.Raft.svg)](https://www.nuget.org/packages/Hangfire.Raft)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/msallin/hangfire-raft/blob/main/LICENSE)
+
 Hangfire job storage backed by a [DotNext](https://github.com/dotnet/dotNext) Raft cluster.
 Job state lives in replicated memory; durability comes from a per-node write-ahead log and
 snapshots on local disk. No SQL Server, no Redis, no external database.
@@ -91,6 +95,7 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
 | `LockLeaseTimeout` | 2 min | Distributed lock lease; renewed at a third of it. |
 | `FetchInvisibilityTimeout` | 5 min | A crashed worker's job becomes fetchable again on the first maintenance pass after this (so up to `+ MaintenanceInterval`, and only with quorum). |
 | `MaintenanceInterval` | 30 s | Leader cleanup cadence. |
+| `SnapshotInterval` | 4096 | Applied log entries between state-machine snapshots; the log compacts up to each snapshot. A tuning/testing knob. |
 | `LowerElectionTimeoutMs` / `UpperElectionTimeoutMs` | 1500 / 3000 | Raft election timeouts. |
 | `LoggerFactory` | none | Diagnostics for the cluster and storage. |
 
