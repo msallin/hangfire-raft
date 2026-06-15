@@ -4,6 +4,7 @@ using Hangfire.Raft.Monitoring;
 using Hangfire.Raft.State;
 using Hangfire.States;
 using Hangfire.Storage;
+using TUnit.Assertions.Enums;
 
 namespace Hangfire.Raft.Tests;
 
@@ -39,8 +40,8 @@ public class RaftMonitoringApiTests
 
     // ----- statistics -----
 
-    [Fact]
-    public void GetStatistics_AggregatesEveryCount()
+    [Test]
+    public async Task GetStatistics_AggregatesEveryCount()
     {
         CreateJob("e");
         Apply(new EnqueueOp("default", "e"));
@@ -56,76 +57,76 @@ public class RaftMonitoringApiTests
             new AnnounceServerOp("srv", 4, ["default"]));
 
         var stats = _api.GetStatistics();
-        Assert.Equal(1, stats.Enqueued);
-        Assert.Equal(1, stats.Processing);
-        Assert.Equal(1, stats.Failed);
-        Assert.Equal(9, stats.Succeeded);
-        Assert.Equal(2, stats.Deleted);
-        Assert.Equal(1, stats.Recurring);
-        Assert.Equal(1, stats.Retries);
-        Assert.Equal(1, stats.Servers);
-        Assert.Equal(1, stats.Queues);
+        await Assert.That(stats.Enqueued).IsEqualTo(1);
+        await Assert.That(stats.Processing).IsEqualTo(1);
+        await Assert.That(stats.Failed).IsEqualTo(1);
+        await Assert.That(stats.Succeeded).IsEqualTo(9);
+        await Assert.That(stats.Deleted).IsEqualTo(2);
+        await Assert.That(stats.Recurring).IsEqualTo(1);
+        await Assert.That(stats.Retries).IsEqualTo(1);
+        await Assert.That(stats.Servers).IsEqualTo(1);
+        await Assert.That(stats.Queues).IsEqualTo(1);
     }
 
     // ----- queues / servers -----
 
-    [Fact]
-    public void Queues_ReportsLengthAndFetchedCount()
+    [Test]
+    public async Task Queues_ReportsLengthAndFetchedCount()
     {
         CreateJob("a");
         CreateJob("b");
         Apply(new EnqueueOp("default", "a"), new EnqueueOp("default", "b"));
         Apply(new FetchOp(["default"], Guid.NewGuid())); // fetches "a" -> 1 enqueued left, 1 fetched
 
-        var queue = Assert.Single(_api.Queues());
-        Assert.Equal("default", queue.Name);
-        Assert.Equal(1, queue.Length);
-        Assert.Equal(1, queue.Fetched);
-        Assert.Single(queue.FirstJobs); // "b" still enqueued
+        var queue = await Assert.That(_api.Queues()).HasSingleItem();
+        await Assert.That(queue.Name).IsEqualTo("default");
+        await Assert.That(queue.Length).IsEqualTo(1);
+        await Assert.That(queue.Fetched).IsEqualTo(1);
+        await Assert.That(queue.FirstJobs).HasSingleItem(); // "b" still enqueued
     }
 
-    [Fact]
-    public void Servers_MapsContextAndHeartbeat()
+    [Test]
+    public async Task Servers_MapsContextAndHeartbeat()
     {
         Apply(new AnnounceServerOp("srv-1", 8, ["default", "critical"]));
         Apply(T0.AddMinutes(1), new HeartbeatOp("srv-1"));
 
-        var server = Assert.Single(_api.Servers());
-        Assert.Equal("srv-1", server.Name);
-        Assert.Equal(8, server.WorkersCount);
-        Assert.Equal(["default", "critical"], server.Queues);
-        Assert.Equal(T0.AddMinutes(1), server.Heartbeat);
+        var server = await Assert.That(_api.Servers()).HasSingleItem();
+        await Assert.That(server.Name).IsEqualTo("srv-1");
+        await Assert.That(server.WorkersCount).IsEqualTo(8);
+        await Assert.That(server.Queues).IsEquivalentTo(["default", "critical"], CollectionOrdering.Matching);
+        await Assert.That(server.Heartbeat).IsEqualTo(T0.AddMinutes(1));
     }
 
     // ----- job details -----
 
-    [Fact]
-    public void JobDetails_MapsPropertiesAndReversesHistory()
+    [Test]
+    public async Task JobDetails_MapsPropertiesAndReversesHistory()
     {
         CreateJob("j", "hello");
         Apply(new SetJobStateOp("j", State(EnqueuedState.StateName, T0)));
         Apply(new SetJobStateOp("j", State(ProcessingState.StateName, T0.AddSeconds(1))));
 
         var details = _api.JobDetails("j");
-        Assert.NotNull(details);
-        Assert.Equal(typeof(TestJobs), details.Job!.Type);
-        Assert.Equal("hello", details.Job.Args[0]);
-        Assert.Equal(T0.AddDays(1), details.ExpireAt);
-        Assert.Equal("de-CH", details.Properties["Culture"]);
+        await Assert.That(details).IsNotNull();
+        await Assert.That(details.Job!.Type).IsEqualTo(typeof(TestJobs));
+        await Assert.That(details.Job.Args[0]).IsEqualTo("hello");
+        await Assert.That(details.ExpireAt).IsEqualTo(T0.AddDays(1));
+        await Assert.That(details.Properties["Culture"]).IsEqualTo("de-CH");
         // History is newest-first in the dashboard.
-        Assert.Equal([ProcessingState.StateName, EnqueuedState.StateName], details.History.Select(h => h.StateName));
+        await Assert.That(details.History.Select(h => h.StateName)).IsEquivalentTo([ProcessingState.StateName, EnqueuedState.StateName], CollectionOrdering.Matching);
     }
 
-    [Fact]
-    public void JobDetails_ReturnsNull_ForMissingJob() => Assert.Null(_api.JobDetails("nope"));
+    [Test]
+    public async Task JobDetails_ReturnsNull_ForMissingJob() => await Assert.That(_api.JobDetails("nope")).IsNull();
 
-    [Fact]
-    public void JobDetails_ThrowsForEmptyId() => Assert.Throws<ArgumentException>(() => _api.JobDetails(""));
+    [Test]
+    public async Task JobDetails_ThrowsForEmptyId() => await Assert.That(() => _api.JobDetails("")).ThrowsExactly<ArgumentException>();
 
     // ----- enqueued page -----
 
-    [Fact]
-    public void EnqueuedJobs_PagesAndSkipsEvictedJobs()
+    [Test]
+    public async Task EnqueuedJobs_PagesAndSkipsEvictedJobs()
     {
         CreateJob("a");
         CreateJob("b");
@@ -135,15 +136,15 @@ public class RaftMonitoringApiTests
         Apply(new EnqueueOp("default", "a"), new EnqueueOp("default", "ghost"), new EnqueueOp("default", "b"));
 
         var page = _api.EnqueuedJobs("default", 0, 10);
-        Assert.Equal(["a", "b"], page.Select(kv => kv.Key));
-        Assert.Equal(T0, page.First(kv => kv.Key == "a").Value.EnqueuedAt);
-        Assert.True(page.First(kv => kv.Key == "a").Value.InEnqueuedState);
+        await Assert.That(page.Select(kv => kv.Key)).IsEquivalentTo(["a", "b"], CollectionOrdering.Matching);
+        await Assert.That(page.First(kv => kv.Key == "a").Value.EnqueuedAt).IsEqualTo(T0);
+        await Assert.That(page.First(kv => kv.Key == "a").Value.InEnqueuedState).IsTrue();
     }
 
     // ----- scheduled page (ordered by schedule-set score, not the state index) -----
 
-    [Fact]
-    public void ScheduledJobs_OrdersByScheduleSetScore()
+    [Test]
+    public async Task ScheduledJobs_OrdersByScheduleSetScore()
     {
         foreach (var (id, score) in new[] { ("late", 300d), ("soon", 100d), ("mid", 200d) })
         {
@@ -153,14 +154,14 @@ public class RaftMonitoringApiTests
         }
 
         var page = _api.ScheduledJobs(0, 10);
-        Assert.Equal(["soon", "mid", "late"], page.Select(kv => kv.Key)); // by score, not insertion/state time
-        Assert.Equal(3, _api.ScheduledCount());
+        await Assert.That(page.Select(kv => kv.Key)).IsEquivalentTo(["soon", "mid", "late"], CollectionOrdering.Matching); // by score, not insertion/state time
+        await Assert.That(_api.ScheduledCount()).IsEqualTo(3);
     }
 
     // ----- succeeded page (duration math + timestamp fallback) -----
 
-    [Fact]
-    public void SucceededJobs_ComputesTotalDuration_AndFallsBackForTimestamp()
+    [Test]
+    public async Task SucceededJobs_ComputesTotalDuration_AndFallsBackForTimestamp()
     {
         CreateJob("s");
         Apply(new SetJobStateOp("s", State(SucceededState.StateName, T0,
@@ -169,55 +170,55 @@ public class RaftMonitoringApiTests
             ("Latency", "5"))));
         // no "SucceededAt" key -> SucceededAt falls back to the current state's CreatedAt (T0).
 
-        var dto = Assert.Single(_api.SucceededJobs(0, 10)).Value;
-        Assert.Equal("42", dto.Result);
-        Assert.Equal(15, dto.TotalDuration); // PerformanceDuration + Latency
-        Assert.Equal(T0, dto.SucceededAt);
-        Assert.Equal(1, _api.SucceededListCount());
+        var dto = (await Assert.That(_api.SucceededJobs(0, 10)).HasSingleItem()).Value;
+        await Assert.That(dto.Result).IsEqualTo("42");
+        await Assert.That(dto.TotalDuration).IsEqualTo(15); // PerformanceDuration + Latency
+        await Assert.That(dto.SucceededAt).IsEqualTo(T0);
+        await Assert.That(_api.SucceededListCount()).IsEqualTo(1);
     }
 
     // ----- fetched page -----
 
-    [Fact]
-    public void FetchedJobs_MapsFetchTime()
+    [Test]
+    public async Task FetchedJobs_MapsFetchTime()
     {
         CreateJob("a");
         Apply(new EnqueueOp("q", "a"));
         Apply(T0.AddSeconds(5), new FetchOp(["q"], Guid.NewGuid()));
 
-        var dto = Assert.Single(_api.FetchedJobs("q", 0, 10));
-        Assert.Equal("a", dto.Key);
-        Assert.Equal(T0.AddSeconds(5), dto.Value.FetchedAt);
-        Assert.Equal(1, _api.FetchedCount("q"));
+        var dto = await Assert.That(_api.FetchedJobs("q", 0, 10)).HasSingleItem();
+        await Assert.That(dto.Key).IsEqualTo("a");
+        await Assert.That(dto.Value.FetchedAt).IsEqualTo(T0.AddSeconds(5));
+        await Assert.That(_api.FetchedCount("q")).IsEqualTo(1);
     }
 
     // ----- awaiting page (continuation parent-state scraping) -----
 
-    [Fact]
-    public void AwaitingJobs_ExtractsParentStateName()
+    [Test]
+    public async Task AwaitingJobs_ExtractsParentStateName()
     {
         CreateJob("w");
         Apply(new SetJobStateOp("w", State(AwaitingState.StateName, T0,
             ("NextState", "{\"$type\":\"...\",\"Name\":\"Enqueued\"}"))));
 
-        var dto = Assert.Single(_api.AwaitingJobs(0, 10)).Value;
-        Assert.Equal("Enqueued", dto.ParentStateName);
-        Assert.Equal(1, _api.AwaitingCount());
+        var dto = (await Assert.That(_api.AwaitingJobs(0, 10)).HasSingleItem()).Value;
+        await Assert.That(dto.ParentStateName).IsEqualTo("Enqueued");
+        await Assert.That(_api.AwaitingCount()).IsEqualTo(1);
     }
 
-    [Theory]
-    [InlineData("{\"$type\":\"x\",\"Name\":\"Enqueued\"}", "Enqueued")]
-    [InlineData("{\"name\":\"Scheduled\"}", "Scheduled")] // marker match is case-insensitive
-    [InlineData("no marker", null)]
-    [InlineData("{\"Name\":\"unterminated", null)]
-    [InlineData("", null)]
-    public void ParseStateName_Cases(string json, string? expected)
-        => Assert.Equal(expected, RaftMonitoringApi.ParseStateName(json));
+    [Test]
+    [Arguments("{\"$type\":\"x\",\"Name\":\"Enqueued\"}", "Enqueued")]
+    [Arguments("{\"name\":\"Scheduled\"}", "Scheduled")] // marker match is case-insensitive
+    [Arguments("no marker", null)]
+    [Arguments("{\"Name\":\"unterminated", null)]
+    [Arguments("", null)]
+    public async Task ParseStateName_Cases(string json, string? expected)
+        => await Assert.That(RaftMonitoringApi.ParseStateName(json)).IsEqualTo(expected);
 
     // ----- date-bucket graphs -----
 
-    [Fact]
-    public void DailyCounts_ReadsSevenDailyBuckets()
+    [Test]
+    public async Task DailyCounts_ReadsSevenDailyBuckets()
     {
         // A fixed instant so the seeded key and the read bucket share one timestamp; reading via the
         // clock-parameterized overload removes the midnight-boundary race the public method would have.
@@ -226,35 +227,35 @@ public class RaftMonitoringApiTests
         Apply(new IncrementCounterOp($"stats:succeeded:{today:yyyy-MM-dd}", 7, null));
 
         var byDate = _api.DailyCounts("succeeded", now);
-        Assert.Equal(7, byDate.Count); // one bucket per day for a week
-        Assert.Equal(7, byDate[today]);
-        Assert.Equal(0, byDate[today.AddDays(-3)]);
+        await Assert.That(byDate.Count).IsEqualTo(7); // one bucket per day for a week
+        await Assert.That(byDate[today]).IsEqualTo(7);
+        await Assert.That(byDate[today.AddDays(-3)]).IsEqualTo(0);
     }
 
-    [Fact]
-    public void HourlyCounts_ReadsTwentyFourHourlyBuckets()
+    [Test]
+    public async Task HourlyCounts_ReadsTwentyFourHourlyBuckets()
     {
         var now = new DateTime(2026, 6, 12, 9, 30, 0, DateTimeKind.Utc);
         var hour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc);
         Apply(new IncrementCounterOp($"stats:failed:{hour:yyyy-MM-dd-HH}", 3, null));
 
         var byHour = _api.HourlyCounts("failed", now);
-        Assert.Equal(24, byHour.Count);
-        Assert.Equal(3, byHour[hour]);
+        await Assert.That(byHour.Count).IsEqualTo(24);
+        await Assert.That(byHour[hour]).IsEqualTo(3);
     }
 
     // ----- counts -----
 
-    [Fact]
-    public void StateCounts_ReflectTheStateIndex()
+    [Test]
+    public async Task StateCounts_ReflectTheStateIndex()
     {
         CreateJob("p1");
         Apply(new SetJobStateOp("p1", State(ProcessingState.StateName, T0)));
         CreateJob("d1");
         Apply(new SetJobStateOp("d1", State(DeletedState.StateName, T0)));
 
-        Assert.Equal(1, _api.ProcessingCount());
-        Assert.Equal(1, _api.DeletedListCount());
-        Assert.Equal(0, _api.FailedCount());
+        await Assert.That(_api.ProcessingCount()).IsEqualTo(1);
+        await Assert.That(_api.DeletedListCount()).IsEqualTo(1);
+        await Assert.That(_api.FailedCount()).IsEqualTo(0);
     }
 }

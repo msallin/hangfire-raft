@@ -5,7 +5,7 @@ using Hangfire.Common;
 using Hangfire.Raft.Cluster;
 using Hangfire.States;
 using Hangfire.Storage;
-using xRetry;
+using TUnit.Assertions.Enums;
 
 namespace Hangfire.Raft.Tests;
 
@@ -13,7 +13,7 @@ namespace Hangfire.Raft.Tests;
 /// End-to-end tests against real Raft clusters on loopback: write-ahead log in a temp directory,
 /// real elections, real TCP transport and command forwarding.
 /// </summary>
-public class RaftJobStorageTests : IDisposable
+public class RaftJobStorageTests
 {
     // The write-ahead log fsyncs on every commit (FlushInterval.Zero, for single-node durability). On a
     // slow shared CI disk that contention can push co-located cluster tests past their election/submit
@@ -26,13 +26,14 @@ public class RaftJobStorageTests : IDisposable
         Guid.NewGuid().ToString("n"));
     private readonly List<RaftJobStorage> _storages = [];
 
-    public void Dispose()
+    [After(Test)]
+    public async Task Cleanup()
     {
         foreach (var storage in _storages)
         {
             try
             {
-                storage.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                await storage.DisposeAsync();
             }
             catch (Exception)
             {
@@ -114,12 +115,13 @@ public class RaftJobStorageTests : IDisposable
         var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
         while (!condition())
         {
-            if (DateTime.UtcNow > deadline) Assert.Fail($"Timed out waiting for: {description}");
+            if (DateTime.UtcNow > deadline) throw new TimeoutException($"Timed out waiting for: {description}");
             await Task.Delay(100);
         }
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task CreateExpiredJob_RoundtripsThroughGetJobData()
     {
         var storage = await StartSingleNode();
@@ -130,14 +132,15 @@ public class RaftJobStorageTests : IDisposable
         var jobId = connection.CreateExpiredJob(job, new Dictionary<string, string> { ["Culture"] = "de-CH" }, createdAt, TimeSpan.FromDays(1));
 
         var data = connection.GetJobData(jobId);
-        Assert.NotNull(data);
-        Assert.Null(data.State);
-        Assert.Equal(typeof(TestJobs), data.Job.Type);
-        Assert.Equal("hello", data.Job.Args[0]);
-        Assert.Equal("de-CH", connection.GetJobParameter(jobId, "Culture"));
+        await Assert.That(data).IsNotNull();
+        await Assert.That(data.State).IsNull();
+        await Assert.That(data.Job.Type).IsEqualTo(typeof(TestJobs));
+        await Assert.That(data.Job.Args[0]).IsEqualTo("hello");
+        await Assert.That(connection.GetJobParameter(jobId, "Culture")).IsEqualTo("de-CH");
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task Transaction_EnqueueAndStateChange_AreAtomicAndVisible()
     {
         var storage = await StartSingleNode();
@@ -153,15 +156,16 @@ public class RaftJobStorageTests : IDisposable
         }
 
         var state = connection.GetStateData(jobId);
-        Assert.NotNull(state);
-        Assert.Equal(EnqueuedState.StateName, state.Name);
-        Assert.Equal("default", state.Data["Queue"]);
+        await Assert.That(state).IsNotNull();
+        await Assert.That(state.Name).IsEqualTo(EnqueuedState.StateName);
+        await Assert.That(state.Data["Queue"]).IsEqualTo("default");
 
         var monitor = storage.GetMonitoringApi();
-        Assert.Equal(1, ((Hangfire.Storage.JobStorageMonitor)monitor).EnqueuedCount("default"));
+        await Assert.That(((Hangfire.Storage.JobStorageMonitor)monitor).EnqueuedCount("default")).IsEqualTo(1);
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task FetchNextJob_ReturnsEnqueuedJob_AndAckRemovesIt()
     {
         var storage = await StartSingleNode();
@@ -175,14 +179,15 @@ public class RaftJobStorageTests : IDisposable
         }
 
         using var fetched = connection.FetchNextJob(["default"], CancellationToken.None);
-        Assert.Equal(jobId, fetched.JobId);
+        await Assert.That(fetched.JobId).IsEqualTo(jobId);
         fetched.RemoveFromQueue();
 
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-        Assert.ThrowsAny<OperationCanceledException>(() => connection.FetchNextJob(["default"], timeout.Token));
+        await Assert.That(() => connection.FetchNextJob(["default"], timeout.Token)).Throws<OperationCanceledException>();
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task FetchNextJob_WakesUp_WhenAJobIsEnqueuedLater()
     {
         var storage = await StartSingleNode();
@@ -200,12 +205,13 @@ public class RaftJobStorageTests : IDisposable
 
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         using var fetched = connection.FetchNextJob(["default"], timeout.Token);
-        Assert.NotNull(fetched);
+        await Assert.That(fetched).IsNotNull();
         fetched.RemoveFromQueue();
         await enqueue;
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task DistributedLock_IsMutuallyExclusive_AcrossConnections()
     {
         var storage = await StartSingleNode();
@@ -213,14 +219,15 @@ public class RaftJobStorageTests : IDisposable
         using var connection2 = (JobStorageConnection)storage.GetConnection();
 
         var handle = connection1.AcquireDistributedLock("locks:test", TimeSpan.FromSeconds(5));
-        Assert.Throws<DistributedLockTimeoutException>(() => connection2.AcquireDistributedLock("locks:test", TimeSpan.FromSeconds(1)));
+        await Assert.That(() => connection2.AcquireDistributedLock("locks:test", TimeSpan.FromSeconds(1))).ThrowsExactly<DistributedLockTimeoutException>();
 
         handle.Dispose();
         using var reacquired = connection2.AcquireDistributedLock("locks:test", TimeSpan.FromSeconds(10));
-        Assert.NotNull(reacquired);
+        await Assert.That(reacquired).IsNotNull();
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task DistributedLock_AfterRenewalsThenDispose_IsImmediatelyReacquirable()
     {
         // Short lease so the background renewal fires several times during the hold; this exercises
@@ -239,10 +246,11 @@ public class RaftJobStorageTests : IDisposable
         // A clean release makes this succeed on the first attempt; a resurrected lock would not free
         // for ~600 ms, so a 400 ms acquisition window discriminates the bug.
         using var reacquired = connection2.AcquireDistributedLock("locks:lease", TimeSpan.FromMilliseconds(400));
-        Assert.NotNull(reacquired);
+        await Assert.That(reacquired).IsNotNull();
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task Heartbeat_ThrowsServerGone_ForUnknownServer()
     {
         var storage = await StartSingleNode();
@@ -251,10 +259,11 @@ public class RaftJobStorageTests : IDisposable
         connection.AnnounceServer("srv-1", new Hangfire.Server.ServerContext { WorkerCount = 4, Queues = ["default"] });
         connection.Heartbeat("srv-1"); // known: no throw
 
-        Assert.Throws<BackgroundServerGoneException>(() => connection.Heartbeat("unknown"));
+        await Assert.That(() => connection.Heartbeat("unknown")).ThrowsExactly<BackgroundServerGoneException>();
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task State_SurvivesARestart_ViaWalReplay()
     {
         var port = AllocatePortPairs(1)[0];
@@ -280,11 +289,12 @@ public class RaftJobStorageTests : IDisposable
         using var restartedConnection = (JobStorageConnection)second.GetConnection();
         await PollUntil(() => restartedConnection.GetJobData(jobId) is not null, "the job is replayed after restart");
         var data = restartedConnection.GetJobData(jobId);
-        Assert.NotNull(data);
-        Assert.Equal("durable", data.Job.Args[0]);
+        await Assert.That(data).IsNotNull();
+        await Assert.That(data.Job.Args[0]).IsEqualTo("durable");
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task ThreeNodeCluster_WritesFromEveryNode_AreVisibleEverywhere()
     {
         var ports = AllocatePortPairs(3);
@@ -333,7 +343,8 @@ public class RaftJobStorageTests : IDisposable
             => ((Hangfire.Storage.JobStorageMonitor)node.GetMonitoringApi()).EnqueuedCount("default");
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task LeaderFailover_WritesResumeOnASurvivingNode_AndPriorStateIsPreserved()
     {
         var ports = AllocatePortPairs(3);
@@ -391,24 +402,26 @@ public class RaftJobStorageTests : IDisposable
         }
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task GetHealth_ReportsLeadership_OnASingleNode()
     {
         var storage = await StartSingleNode();
         await PollUntil(() => storage.GetHealth().HasLeader, "the node elects itself leader");
 
         var health = storage.GetHealth();
-        Assert.True(health.HasLeader);
-        Assert.True(health.IsLeader);
-        Assert.NotNull(health.LeaderEndpoint);
-        Assert.False(health.Faulted);
+        await Assert.That(health.HasLeader).IsTrue();
+        await Assert.That(health.IsLeader).IsTrue();
+        await Assert.That(health.LeaderEndpoint).IsNotNull();
+        await Assert.That(health.Faulted).IsFalse();
         // A cold-started single member establishes leadership at the genesis term without a competitive
         // election, so its term is exactly 0 under DotNext 6.x (multi-node elections advance the term).
-        Assert.Equal(0L, health.Term);
-        Assert.Equal(1, health.MemberCount);
+        await Assert.That(health.Term).IsEqualTo(0L);
+        await Assert.That(health.MemberCount).IsEqualTo(1);
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task StartAsync_DoesNotThrow_WhenAPeerHostnameIsUnresolvable()
     {
         // Members are DnsEndPoints resolved lazily by the transport, so an unresolvable peer is
@@ -428,10 +441,11 @@ public class RaftJobStorageTests : IDisposable
         var storage = await RaftJobStorage.StartAsync(options); // must not throw
         _storages.Add(storage);
 
-        Assert.False(storage.GetHealth().HasLeader); // 1 of 2 reachable -> no quorum, but no crash
+        await Assert.That(storage.GetHealth().HasLeader).IsFalse(); // 1 of 2 reachable -> no quorum, but no crash
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task Compaction_SnapshotsTheLog_AndStateSurvivesRestart()
     {
         var port = AllocatePortPairs(1)[0];
@@ -457,11 +471,12 @@ public class RaftJobStorageTests : IDisposable
         var second = await StartNode(port, [port], walPath, snapshotInterval: 64);
         using var restarted = (JobStorageConnection)second.GetConnection();
         await PollUntil(() => restarted.GetJobData(jobId) is not null, "the compacted state is restored after restart");
-        Assert.NotNull(restarted.GetJobData(jobId));
-        Assert.Equal("199", restarted.GetValueFromHash("hash-9", "i"));
+        await Assert.That(restarted.GetJobData(jobId)).IsNotNull();
+        await Assert.That(restarted.GetValueFromHash("hash-9", "i")).IsEqualTo("199");
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task Transaction_SecondCommit_Throws()
     {
         var storage = await StartSingleNode();
@@ -470,10 +485,11 @@ public class RaftJobStorageTests : IDisposable
         using var transaction = connection.CreateWriteTransaction();
         transaction.IncrementCounter("c");
         transaction.Commit();
-        Assert.Throws<InvalidOperationException>(transaction.Commit);
+        await Assert.That(transaction.Commit).ThrowsExactly<InvalidOperationException>();
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task Statistics_ReflectOperations()
     {
         var storage = await StartSingleNode();
@@ -489,40 +505,43 @@ public class RaftJobStorageTests : IDisposable
         }
 
         var stats = ((Hangfire.Storage.JobStorageMonitor)storage.GetMonitoringApi()).GetStatistics();
-        Assert.Equal(1, stats.Scheduled);
-        Assert.Equal(1, stats.Recurring);
-        Assert.Equal(1, stats.Succeeded);
+        await Assert.That(stats.Scheduled).IsEqualTo(1);
+        await Assert.That(stats.Recurring).IsEqualTo(1);
+        await Assert.That(stats.Succeeded).IsEqualTo(1);
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task Connection_ValidatesArguments()
     {
         var storage = await StartSingleNode();
         using var c = (JobStorageConnection)storage.GetConnection();
 
-        Assert.Throws<ArgumentException>(() => c.FetchNextJob([], CancellationToken.None));
-        Assert.Throws<ArgumentException>(() => c.FetchNextJob(null!, CancellationToken.None));
-        Assert.Throws<ArgumentException>(() => c.GetFirstByLowestScoreFromSet("s", 0, 10, 0)); // count <= 0
-        Assert.Throws<ArgumentException>(() => c.GetFirstByLowestScoreFromSet("s", 10, 0));     // fromScore > toScore
-        Assert.Throws<ArgumentOutOfRangeException>(() => c.GetSetCount(["s"], -1));
-        Assert.Throws<ArgumentOutOfRangeException>(() => c.RemoveTimedOutServers(TimeSpan.FromSeconds(-1)));
-        Assert.Throws<ArgumentException>(() => c.GetJobData(""));
-        Assert.Throws<ArgumentException>(() => c.GetAllItemsFromSet(""));
-        Assert.Throws<ArgumentException>(() => c.GetValueFromHash("", "f"));
+        await Assert.That(() => c.FetchNextJob([], CancellationToken.None)).ThrowsExactly<ArgumentException>();
+        await Assert.That(() => c.FetchNextJob(null!, CancellationToken.None)).ThrowsExactly<ArgumentException>();
+        await Assert.That(() => c.GetFirstByLowestScoreFromSet("s", 0, 10, 0)).ThrowsExactly<ArgumentException>(); // count <= 0
+        await Assert.That(() => c.GetFirstByLowestScoreFromSet("s", 10, 0)).ThrowsExactly<ArgumentException>();     // fromScore > toScore
+        await Assert.That(() => c.GetSetCount(["s"], -1)).ThrowsExactly<ArgumentOutOfRangeException>();
+        await Assert.That(() => c.RemoveTimedOutServers(TimeSpan.FromSeconds(-1))).ThrowsExactly<ArgumentOutOfRangeException>();
+        await Assert.That(() => c.GetJobData("")).ThrowsExactly<ArgumentException>();
+        await Assert.That(() => c.GetAllItemsFromSet("")).ThrowsExactly<ArgumentException>();
+        await Assert.That(() => c.GetValueFromHash("", "f")).ThrowsExactly<ArgumentException>();
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task Storage_AdvertisesFeatures_AndDescribesItself()
     {
         var storage = await StartSingleNode();
 
-        Assert.True(storage.HasFeature(JobStorageFeatures.ExtendedApi));
-        Assert.True(storage.HasFeature(JobStorageFeatures.Transaction.CreateJob));
-        Assert.False(storage.HasFeature("some.unknown.feature"));
-        Assert.Contains("Raft", storage.ToString());
+        await Assert.That(storage.HasFeature(JobStorageFeatures.ExtendedApi)).IsTrue();
+        await Assert.That(storage.HasFeature(JobStorageFeatures.Transaction.CreateJob)).IsTrue();
+        await Assert.That(storage.HasFeature("some.unknown.feature")).IsFalse();
+        await Assert.That(storage.ToString()).Contains("Raft");
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task Connection_ReadsBackEverythingWritten()
     {
         var storage = await StartSingleNode();
@@ -543,33 +562,34 @@ public class RaftJobStorageTests : IDisposable
         }
 
         // sets
-        Assert.Equal(["a", "b"], c.GetAllItemsFromSet("s").OrderBy(x => x));
-        Assert.Equal(2, c.GetSetCount("s"));
-        Assert.True(c.GetSetContains("s", "a"));
-        Assert.False(c.GetSetContains("s", "z"));
-        Assert.Contains("a", c.GetRangeFromSet("s", 0, 10));
-        Assert.Equal("a", c.GetFirstByLowestScoreFromSet("s", 0, 5));
-        Assert.True(c.GetSetTtl("s") > TimeSpan.Zero);
+        await Assert.That(c.GetAllItemsFromSet("s").OrderBy(x => x)).IsEquivalentTo(["a", "b"], CollectionOrdering.Matching);
+        await Assert.That(c.GetSetCount("s")).IsEqualTo(2);
+        await Assert.That(c.GetSetContains("s", "a")).IsTrue();
+        await Assert.That(c.GetSetContains("s", "z")).IsFalse();
+        await Assert.That(c.GetRangeFromSet("s", 0, 10)).Contains("a");
+        await Assert.That(c.GetFirstByLowestScoreFromSet("s", 0, 5)).IsEqualTo("a");
+        await Assert.That(c.GetSetTtl("s") > TimeSpan.Zero).IsTrue();
         // lists (newest-first)
-        Assert.Equal(["y", "x"], c.GetAllItemsFromList("l"));
-        Assert.Equal(2, c.GetListCount("l"));
-        Assert.Equal(["y"], c.GetRangeFromList("l", 0, 0));
-        Assert.True(c.GetListTtl("l") > TimeSpan.Zero);
+        await Assert.That(c.GetAllItemsFromList("l")).IsEquivalentTo(["y", "x"], CollectionOrdering.Matching);
+        await Assert.That(c.GetListCount("l")).IsEqualTo(2);
+        await Assert.That(c.GetRangeFromList("l", 0, 0)).IsEquivalentTo(["y"], CollectionOrdering.Matching);
+        await Assert.That(c.GetListTtl("l") > TimeSpan.Zero).IsTrue();
         // hash
-        Assert.Equal("v", c.GetValueFromHash("h", "f"));
-        Assert.Equal(1, c.GetHashCount("h"));
-        Assert.True(c.GetHashTtl("h") > TimeSpan.Zero);
-        Assert.Equal("v", c.GetAllEntriesFromHash("h")!["f"]);
+        await Assert.That(c.GetValueFromHash("h", "f")).IsEqualTo("v");
+        await Assert.That(c.GetHashCount("h")).IsEqualTo(1);
+        await Assert.That(c.GetHashTtl("h") > TimeSpan.Zero).IsTrue();
+        await Assert.That(c.GetAllEntriesFromHash("h")!["f"]).IsEqualTo("v");
         // counter
-        Assert.Equal(1, c.GetCounter("cnt"));
+        await Assert.That(c.GetCounter("cnt")).IsEqualTo(1);
 
         // job parameter round-trip
         var jobId = c.CreateExpiredJob(Job.FromExpression(() => TestJobs.Run("x")), new Dictionary<string, string>(), DateTime.UtcNow, TimeSpan.FromDays(1));
         c.SetJobParameter(jobId, "p", "1");
-        Assert.Equal("1", c.GetJobParameter(jobId, "p"));
+        await Assert.That(c.GetJobParameter(jobId, "p")).IsEqualTo("1");
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task FetchedJob_DisposeWithoutAck_RequeuesTheJob()
     {
         var storage = await StartSingleNode();
@@ -583,16 +603,17 @@ public class RaftJobStorageTests : IDisposable
         }
 
         var fetched = connection.FetchNextJob(["q"], CancellationToken.None);
-        Assert.Equal(jobId, fetched.JobId);
+        await Assert.That(fetched.JobId).IsEqualTo(jobId);
         fetched.Dispose(); // neither acked nor explicitly requeued -> Dispose requeues
 
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         using var refetched = connection.FetchNextJob(["q"], timeout.Token);
-        Assert.Equal(jobId, refetched.JobId);
+        await Assert.That(refetched.JobId).IsEqualTo(jobId);
         refetched.RemoveFromQueue();
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task FetchedJob_RenewalKeepsTheLeaseAlive_PastTheInvisibilityTimeout()
     {
         var port = AllocatePortPairs(1)[0];
@@ -616,12 +637,13 @@ public class RaftJobStorageTests : IDisposable
         // Hold well past the invisibility timeout: the background renewal must keep maintenance from
         // reclaiming the lease, so the job stays fetched and is not put back on the queue.
         await Task.Delay(TimeSpan.FromSeconds(2));
-        Assert.Equal(1, monitor.FetchedCount("q"));
-        Assert.Equal(0, monitor.EnqueuedCount("q"));
+        await Assert.That(monitor.FetchedCount("q")).IsEqualTo(1);
+        await Assert.That(monitor.EnqueuedCount("q")).IsEqualTo(0);
         fetched.RemoveFromQueue();
     }
 
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task GetHealth_OnAFollower_ReportsTheRemoteLeader()
     {
         var ports = AllocatePortPairs(3);
@@ -633,16 +655,16 @@ public class RaftJobStorageTests : IDisposable
             "a follower that sees a remote leader");
 
         var health = follower.GetHealth();
-        Assert.True(health.HasLeader);
-        Assert.False(health.IsLeader);
-        Assert.NotNull(health.LeaderEndpoint);
-        Assert.False(health.Faulted);
+        await Assert.That(health.HasLeader).IsTrue();
+        await Assert.That(health.IsLeader).IsFalse();
+        await Assert.That(health.LeaderEndpoint).IsNotNull();
+        await Assert.That(health.Faulted).IsFalse();
         // All three members are seeded into the committed configuration at genesis, so every node knows
         // the full set regardless of which is currently reachable.
-        Assert.Equal(3, health.MemberCount);
+        await Assert.That(health.MemberCount).IsEqualTo(3);
     }
 
-    [Fact]
+    [Test]
     public async Task PersistentConfig_RoundTripsIpAndDnsEndpoints()
     {
         // The endpoint (de)serialization is custom (it reuses DotNext's EndPointFormatter), so verify both
@@ -666,11 +688,11 @@ public class RaftJobStorageTests : IDisposable
         using (IClusterConfigurationStorage<EndPoint> reopened = new EndPointPersistentConfigurationStorage(file))
         {
             var config = await reopened.LoadConfigurationAsync();
-            Assert.Equal(2, config.Members.Count);
-            Assert.Contains(ip, config.Members);
-            Assert.Contains(dns, config.Members);
+            await Assert.That(config.Members.Count).IsEqualTo(2);
+            await Assert.That(config.Members).Contains(ip);
+            await Assert.That(config.Members).Contains(dns);
             // The DNS member must round-trip as a DnsEndPoint, not collapse to a resolved IP address.
-            Assert.Contains(config.Members, m => m is DnsEndPoint { Host: "node1.local", Port: 6000 });
+            await Assert.That(config.Members).Contains(m => m is DnsEndPoint { Host: "node1.local", Port: 6000 });
         }
     }
 }

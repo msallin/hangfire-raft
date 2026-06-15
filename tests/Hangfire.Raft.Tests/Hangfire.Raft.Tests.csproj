@@ -7,21 +7,16 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <IsPackable>false</IsPackable>
+    <!-- TUnit runs on Microsoft.Testing.Platform: the test project is a self-contained executable
+         whose entry point is source-generated, so it must build as an Exe. -->
+    <OutputType>Exe</OutputType>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="10.0.1" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
-    <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
-    <!-- Bounded retry for the real-cluster integration tests, which boot loopback Raft clusters whose
-         election/lease timing is sensitive to CI thread-pool contention. A deterministic failure still
-         fails every attempt; only environmental timing flakes are absorbed. Logic tests stay plain [Fact]. -->
-    <PackageReference Include="xRetry" Version="1.9.0" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Using Include="Xunit" />
+    <!-- The TUnit meta-package brings the engine, the assertion library and the MTP extensions
+         (TRX report, code coverage) in one reference. Microsoft.NET.Test.Sdk must NOT be added:
+         it pulls in the legacy VSTest host and breaks TUnit's test discovery. -->
+    <PackageReference Include="TUnit" Version="1.56.0" />
   </ItemGroup>
 
   <ItemGroup>

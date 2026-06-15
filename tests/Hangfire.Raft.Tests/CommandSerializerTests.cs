@@ -1,4 +1,5 @@
 using Hangfire.Raft.Commands;
+using TUnit.Assertions.Enums;
 
 namespace Hangfire.Raft.Tests;
 
@@ -55,55 +56,60 @@ public class CommandSerializerTests
         ],
     };
 
-    [Fact]
-    public void Roundtrip_PreservesEveryOp()
+    [Test]
+    public async Task Roundtrip_PreservesEveryOp()
     {
         var command = BuildCommandWithEveryOp();
 
         var bytes = CommandSerializer.Serialize(command);
         var restored = CommandSerializer.TryDeserialize(bytes);
 
-        Assert.NotNull(restored);
-        Assert.Equal(command.Id, restored.Id);
-        Assert.Equal(command.NowUtc, restored.NowUtc);
-        Assert.Equal(command.Ops.Count, restored.Ops.Count);
-        Assert.Equal(command.Ops.Select(o => o.GetType()), restored.Ops.Select(o => o.GetType()));
+        await Assert.That(restored).IsNotNull();
+        await Assert.That(restored.Id).IsEqualTo(command.Id);
+        await Assert.That(restored.NowUtc).IsEqualTo(command.NowUtc);
+        await Assert.That(restored.Ops.Count).IsEqualTo(command.Ops.Count);
+        await Assert.That(restored.Ops.Select(o => o.GetType())).IsEquivalentTo(command.Ops.Select(o => o.GetType()), CollectionOrdering.Matching);
 
         // Re-serializing the restored command must produce identical bytes; this catches any field
         // that is written but read differently (or not at all).
         var bytes2 = CommandSerializer.Serialize(restored);
-        Assert.Equal(bytes, bytes2);
+        await Assert.That(bytes2).IsEquivalentTo(bytes, CollectionOrdering.Matching);
     }
 
-    [Fact]
-    public void Roundtrip_PreservesValues()
+    [Test]
+    public async Task Roundtrip_PreservesValues()
     {
         var command = BuildCommandWithEveryOp();
         var restored = CommandSerializer.TryDeserialize(CommandSerializer.Serialize(command))!;
 
-        var create = Assert.IsType<CreateJobOp>(restored.Ops[0]);
-        Assert.Equal("job-1", create.JobId);
-        Assert.Equal(Now.AddDays(1), create.ExpireAt);
-        Assert.Equal([new("Key", "Value"), new("NullKey", null)], create.Parameters);
+        await Assert.That(restored.Ops[0]).IsTypeOf<CreateJobOp>();
+        var create = (CreateJobOp)restored.Ops[0];
+        await Assert.That(create.JobId).IsEqualTo("job-1");
+        await Assert.That(create.ExpireAt).IsEqualTo(Now.AddDays(1));
+        await Assert.That(create.Parameters).IsEquivalentTo(new KeyValuePair<string, string?>[] { new("Key", "Value"), new("NullKey", null) }, CollectionOrdering.Matching);
 
-        var setState = Assert.IsType<SetJobStateOp>(restored.Ops[3]);
-        Assert.Equal("Enqueued", setState.State.Name);
-        Assert.Equal("reason", setState.State.Reason);
-        Assert.Equal([new("Queue", "default")], setState.State.Data);
+        await Assert.That(restored.Ops[3]).IsTypeOf<SetJobStateOp>();
+        var setState = (SetJobStateOp)restored.Ops[3];
+        await Assert.That(setState.State.Name).IsEqualTo("Enqueued");
+        await Assert.That(setState.State.Reason).IsEqualTo("reason");
+        await Assert.That(setState.State.Data).IsEquivalentTo(new KeyValuePair<string, string?>[] { new("Queue", "default") }, CollectionOrdering.Matching);
 
-        var fetch = Assert.IsType<FetchOp>(restored.Ops[8]);
-        Assert.Equal(["critical", "default"], fetch.Queues);
+        await Assert.That(restored.Ops[8]).IsTypeOf<FetchOp>();
+        var fetch = (FetchOp)restored.Ops[8];
+        await Assert.That(fetch.Queues).IsEquivalentTo(["critical", "default"], CollectionOrdering.Matching);
 
-        var counter = Assert.IsType<IncrementCounterOp>(restored.Ops[13]);
-        Assert.Equal(-5, counter.Delta);
-        Assert.Null(counter.ExpireAt);
+        await Assert.That(restored.Ops[13]).IsTypeOf<IncrementCounterOp>();
+        var counter = (IncrementCounterOp)restored.Ops[13];
+        await Assert.That(counter.Delta).IsEqualTo(-5);
+        await Assert.That(counter.ExpireAt).IsNull();
 
-        var addToSet = Assert.IsType<AddToSetOp>(restored.Ops[14]);
-        Assert.Equal(1718100000.5, addToSet.Score);
+        await Assert.That(restored.Ops[14]).IsTypeOf<AddToSetOp>();
+        var addToSet = (AddToSetOp)restored.Ops[14];
+        await Assert.That(addToSet.Score).IsEqualTo(1718100000.5);
     }
 
-    [Fact]
-    public void EveryOpType_IsCoveredByRoundtripCommand()
+    [Test]
+    public async Task EveryOpType_IsCoveredByRoundtripCommand()
     {
         var allOpTypes = typeof(StoreOp).Assembly.GetTypes()
             .Where(t => !t.IsAbstract && t.IsAssignableTo(typeof(StoreOp)))
@@ -111,18 +117,18 @@ public class CommandSerializerTests
         var covered = BuildCommandWithEveryOp().Ops.Select(o => o.GetType()).ToHashSet();
 
         var missing = allOpTypes.Except(covered).Select(t => t.Name).ToList();
-        Assert.True(missing.Count == 0, $"Ops missing from the roundtrip test: {string.Join(", ", missing)}");
+        await Assert.That(missing).IsEmpty(); // failure lists the ops missing from the roundtrip command
     }
 
-    [Fact]
-    public void TryDeserialize_ReturnsNull_ForForeignPayloads()
+    [Test]
+    public async Task TryDeserialize_ReturnsNull_ForForeignPayloads()
     {
-        Assert.Null(CommandSerializer.TryDeserialize(ReadOnlyMemory<byte>.Empty));
-        Assert.Null(CommandSerializer.TryDeserialize(new byte[] { 0x00, 0x01, 0x02 }));
+        await Assert.That(CommandSerializer.TryDeserialize(ReadOnlyMemory<byte>.Empty)).IsNull();
+        await Assert.That(CommandSerializer.TryDeserialize(new byte[] { 0x00, 0x01, 0x02 })).IsNull();
     }
 
-    [Fact]
-    public void Batch_SnapshotsOps_SoLaterMutationOfTheSourceListCannotChangeTheCommand()
+    [Test]
+    public async Task Batch_SnapshotsOps_SoLaterMutationOfTheSourceListCannotChangeTheCommand()
     {
         var source = new List<StoreOp> { new PersistJobOp("a"), new PersistJobOp("b") };
         var command = Command.Batch(source);
@@ -130,7 +136,8 @@ public class CommandSerializerTests
         source.Add(new PersistJobOp("c")); // mutate the caller's list after creating the command
         source[0] = new PersistJobOp("mutated");
 
-        Assert.Equal(2, command.Ops.Count); // the envelope kept its own copy
-        Assert.Equal("a", Assert.IsType<PersistJobOp>(command.Ops[0]).JobId);
+        await Assert.That(command.Ops.Count).IsEqualTo(2); // the envelope kept its own copy
+        await Assert.That(command.Ops[0]).IsTypeOf<PersistJobOp>();
+        await Assert.That(((PersistJobOp)command.Ops[0]).JobId).IsEqualTo("a");
     }
 }
