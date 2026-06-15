@@ -80,7 +80,7 @@ jobs:
 
       # --- NuGet publishing via Trusted Publishing (OIDC). ---
       # No long-lived API key: NuGet/login swaps the GitHub OIDC token for a short-lived key, authorized
-      # by the trusted publishing policy on nuget.org (the policy must name this workflow file, cd.yml).
+      # by the trusted publishing policy on nuget.org (the policy must name this workflow file, cd.yaml).
       # Gated to tag pushes so a manual run stays a dry run and never pushes the 0.0.0-dev.* version.
       # https://learn.microsoft.com/nuget/nuget-org/trusted-publishing
       - name: NuGet login (OIDC)
