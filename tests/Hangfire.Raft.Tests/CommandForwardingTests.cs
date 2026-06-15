@@ -32,59 +32,59 @@ public class CommandForwardingTests
 
     private static Task<(byte, string?)> Respond(byte status) => Task.FromResult((status, (string?)null));
 
-    [Fact]
+    [Test]
     public async Task StatusOk_Returns()
     {
         var port = FreePort();
         await using var server = StartServer(port, (_, _) => Respond(ForwardingProtocol.StatusOk));
         using var client = new ForwardingClient();
 
-        await client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, port), Payload, CancellationToken.None); // no throw
+        await Assert.That(async () => await client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, port), Payload, CancellationToken.None)).ThrowsNothing(); // no throw
     }
 
-    [Fact]
+    [Test]
     public async Task StatusNotLeader_ThrowsNotLeaderResponse()
     {
         var port = FreePort();
         await using var server = StartServer(port, (_, _) => Respond(ForwardingProtocol.StatusNotLeader));
         using var client = new ForwardingClient();
 
-        await Assert.ThrowsAsync<NotLeaderResponseException>(
-            () => client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, port), Payload, CancellationToken.None));
+        await Assert.That(
+            () => client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, port), Payload, CancellationToken.None)).ThrowsExactly<NotLeaderResponseException>();
     }
 
-    [Fact]
+    [Test]
     public async Task StatusAmbiguous_ThrowsAmbiguous()
     {
         var port = FreePort();
         await using var server = StartServer(port, (_, _) => Task.FromResult((ForwardingProtocol.StatusAmbiguous, (string?)"unknown")));
         using var client = new ForwardingClient();
 
-        await Assert.ThrowsAsync<AmbiguousCommandException>(
-            () => client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, port), Payload, CancellationToken.None));
+        await Assert.That(
+            () => client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, port), Payload, CancellationToken.None)).ThrowsExactly<AmbiguousCommandException>();
     }
 
-    [Fact]
+    [Test]
     public async Task StatusError_ThrowsRaftStorageException()
     {
         var port = FreePort();
         await using var server = StartServer(port, (_, _) => Task.FromResult((ForwardingProtocol.StatusError, (string?)"rejected")));
         using var client = new ForwardingClient();
 
-        await Assert.ThrowsAsync<RaftStorageException>(
-            () => client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, port), Payload, CancellationToken.None));
+        await Assert.That(
+            () => client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, port), Payload, CancellationToken.None)).ThrowsExactly<RaftStorageException>();
     }
 
-    [Fact]
+    [Test]
     public async Task ConnectFailure_IsRetryable()
     {
         // No server on this port: the failure happens before the request is written -> safe to retry.
         using var client = new ForwardingClient();
-        await Assert.ThrowsAsync<RetryableForwardingException>(
-            () => client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, FreePort()), Payload, CancellationToken.None));
+        await Assert.That(
+            () => client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, FreePort()), Payload, CancellationToken.None)).ThrowsExactly<RetryableForwardingException>();
     }
 
-    [Fact]
+    [Test]
     public async Task ConnectionLostAfterRequest_IsAmbiguous()
     {
         // The handler receives the full request, then the connection is torn down without a response.
@@ -93,11 +93,11 @@ public class CommandForwardingTests
         await using var server = StartServer(port, (_, _) => throw new InvalidOperationException("leader died mid-replication"));
         using var client = new ForwardingClient();
 
-        await Assert.ThrowsAsync<AmbiguousCommandException>(
-            () => client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, port), Payload, CancellationToken.None));
+        await Assert.That(
+            () => client.SubmitAsync(new IPEndPoint(IPAddress.Loopback, port), Payload, CancellationToken.None)).ThrowsExactly<AmbiguousCommandException>();
     }
 
-    [Fact]
+    [Test]
     public async Task PooledConnection_IsReusedAcrossSubmits()
     {
         var calls = 0;
@@ -109,10 +109,10 @@ public class CommandForwardingTests
         await client.SubmitAsync(endpoint, Payload, CancellationToken.None);
         await client.SubmitAsync(endpoint, Payload, CancellationToken.None); // reuses the pooled connection
 
-        Assert.Equal(2, calls);
+        await Assert.That(calls).IsEqualTo(2);
     }
 
-    [Fact]
+    [Test]
     public async Task Server_DropsConnection_OnBadMagic()
     {
         var port = FreePort();
@@ -125,22 +125,22 @@ public class CommandForwardingTests
 
         // The server logs and closes the connection, so the read returns 0 (end of stream).
         var read = await stream.ReadAsync(new byte[1]);
-        Assert.Equal(0, read);
+        await Assert.That(read).IsEqualTo(0);
     }
 
-    [Fact]
-    public void IsRetryable_OnlyForProvablyNotAppendedFailures()
+    [Test]
+    public async Task IsRetryable_OnlyForProvablyNotAppendedFailures()
     {
         // This classification is the gate the submit loop uses to decide resend-or-wait. Retryable
         // failures are those where the command provably never reached the log, so resending is safe.
-        Assert.True(RaftStorageCluster.IsRetryable(new NotLeaderResponseException()));
-        Assert.True(RaftStorageCluster.IsRetryable(new RetryableForwardingException("x", new IOException())));
-        Assert.True(RaftStorageCluster.IsRetryable(new TimeoutException()));
+        await Assert.That(RaftStorageCluster.IsRetryable(new NotLeaderResponseException())).IsTrue();
+        await Assert.That(RaftStorageCluster.IsRetryable(new RetryableForwardingException("x", new IOException()))).IsTrue();
+        await Assert.That(RaftStorageCluster.IsRetryable(new TimeoutException())).IsTrue();
 
         // An ambiguous outcome must NEVER be retried: a second committed copy of a non-idempotent op
         // (e.g. a fetch) could lose a job. Unrelated failures are not blindly retried either.
-        Assert.False(RaftStorageCluster.IsRetryable(new AmbiguousCommandException("x")));
-        Assert.False(RaftStorageCluster.IsRetryable(new InvalidOperationException()));
-        Assert.False(RaftStorageCluster.IsRetryable(new RaftStorageException("x")));
+        await Assert.That(RaftStorageCluster.IsRetryable(new AmbiguousCommandException("x"))).IsFalse();
+        await Assert.That(RaftStorageCluster.IsRetryable(new InvalidOperationException())).IsFalse();
+        await Assert.That(RaftStorageCluster.IsRetryable(new RaftStorageException("x"))).IsFalse();
     }
 }

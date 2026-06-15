@@ -1,12 +1,11 @@
 using System.Runtime.CompilerServices;
-using Xunit;
 
 // The integration tests boot real Raft clusters that fsync on every commit (durability-on-commit).
-// Running them in parallel with the other test collections contends for disk and CPU on a single machine
-// and intermittently times out a cluster write - an artifact of co-locating many clusters on one disk,
-// not a product issue (a deployment runs one cluster per node). Serialize test collections so the cluster
+// Running them in parallel with the other tests contends for disk and CPU on a single machine and
+// intermittently times out a cluster write - an artifact of co-locating many clusters on one disk,
+// not a product issue (a deployment runs one cluster per node). Disable parallelization so the cluster
 // tests run without that contention.
-[assembly: CollectionBehavior(DisableTestParallelization = true)]
+[assembly: NotInParallel]
 
 namespace Hangfire.Raft.Tests;
 

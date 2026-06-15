@@ -61,7 +61,9 @@ jobs:
         run: dotnet build Hangfire.Raft.slnx -c Release --no-restore -p:Version=${{ steps.version.outputs.version }}
 
       - name: Test
-        run: dotnet test Hangfire.Raft.slnx -c Release --no-build
+        # TUnit runs on Microsoft.Testing.Platform (opted in via global.json), so target the solution
+        # with the native MTP `dotnet test` syntax.
+        run: dotnet test --solution Hangfire.Raft.slnx -c Release --no-build
 
       - name: Pack
         run: >

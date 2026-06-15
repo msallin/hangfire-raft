@@ -1,5 +1,6 @@
 using System.Text;
 using Hangfire.Raft.Commands;
+using TUnit.Assertions.Enums;
 
 namespace Hangfire.Raft.Tests;
 
@@ -14,23 +15,23 @@ public class CommandSerializerFailureTests
 
     private static readonly DateTime T0 = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-    [Fact]
-    public void TryDeserialize_Throws_OnUnsupportedVersion()
+    [Test]
+    public async Task TryDeserialize_Throws_OnUnsupportedVersion()
     {
         var bytes = CommandSerializer.Serialize(Command.Single(new PersistJobOp("j")));
         bytes[1] = 0xFE; // corrupt the version byte (index 1, right after the magic)
-        Assert.Throws<NotSupportedException>(() => CommandSerializer.TryDeserialize(bytes));
+        await Assert.That(() => CommandSerializer.TryDeserialize(bytes)).ThrowsExactly<NotSupportedException>();
     }
 
-    [Fact]
-    public void TryDeserialize_Throws_OnTruncatedPayload()
+    [Test]
+    public async Task TryDeserialize_Throws_OnTruncatedPayload()
     {
         var bytes = CommandSerializer.Serialize(Command.Single(new CreateJobOp("j", "data", [], T0, T0)));
-        Assert.ThrowsAny<Exception>(() => CommandSerializer.TryDeserialize(bytes[..^3])); // EndOfStreamException
+        await Assert.That(() => CommandSerializer.TryDeserialize(bytes[..^3])).Throws<Exception>(); // EndOfStreamException
     }
 
-    [Fact]
-    public void TryDeserialize_Throws_OnUnknownOpcode()
+    [Test]
+    public async Task TryDeserialize_Throws_OnUnknownOpcode()
     {
         using var ms = new MemoryStream();
         using (var w = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true))
@@ -43,21 +44,21 @@ public class CommandSerializerFailureTests
             w.Write((byte)0xFF);                       // opcode that does not exist
         }
 
-        Assert.Throws<NotSupportedException>(() => CommandSerializer.TryDeserialize(ms.ToArray()));
+        await Assert.That(() => CommandSerializer.TryDeserialize(ms.ToArray())).ThrowsExactly<NotSupportedException>();
     }
 
-    [Fact]
-    public void ReadCount_Rejects_CountLargerThanRemainingBytes()
+    [Test]
+    public async Task ReadCount_Rejects_CountLargerThanRemainingBytes()
     {
         using var ms = new MemoryStream();
         using (var w = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true)) w.Write7BitEncodedInt(int.MaxValue);
         ms.Position = 0;
         using var r = new BinaryReader(ms);
-        Assert.Throws<InvalidDataException>(() => BinaryFormat.ReadCount(r));
+        await Assert.That(() => BinaryFormat.ReadCount(r)).ThrowsExactly<InvalidDataException>();
     }
 
-    [Fact]
-    public void ReadCount_Accepts_CountUpToRemainingBytes()
+    [Test]
+    public async Task ReadCount_Accepts_CountUpToRemainingBytes()
     {
         using var ms = new MemoryStream();
         using (var w = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true))
@@ -67,11 +68,11 @@ public class CommandSerializerFailureTests
         }
         ms.Position = 0;
         using var r = new BinaryReader(ms);
-        Assert.Equal(3, BinaryFormat.ReadCount(r));
+        await Assert.That(BinaryFormat.ReadCount(r)).IsEqualTo(3);
     }
 
-    [Fact]
-    public void Roundtrip_HandlesLargeMultibyteStrings_AndEmptyCollections()
+    [Test]
+    public async Task Roundtrip_HandlesLargeMultibyteStrings_AndEmptyCollections()
     {
         var big = string.Concat(Enumerable.Repeat("emoji-\U0001F600-柳-", 500)); // multi-KB, multibyte UTF-8
         var command = new Command
@@ -88,7 +89,9 @@ public class CommandSerializerFailureTests
 
         var bytes = CommandSerializer.Serialize(command);
         var restored = CommandSerializer.TryDeserialize(bytes)!;
-        Assert.Equal(big, Assert.IsType<CreateJobOp>(restored.Ops[0]).InvocationData);
-        Assert.Equal(bytes, CommandSerializer.Serialize(restored)); // byte-stable through the multibyte/empty paths
+        await Assert.That(restored.Ops[0]).IsTypeOf<CreateJobOp>();
+        var createJobOp = (CreateJobOp)restored.Ops[0];
+        await Assert.That(createJobOp.InvocationData).IsEqualTo(big);
+        await Assert.That(CommandSerializer.Serialize(restored)).IsEquivalentTo(bytes, CollectionOrdering.Matching); // byte-stable through the multibyte/empty paths
     }
 }

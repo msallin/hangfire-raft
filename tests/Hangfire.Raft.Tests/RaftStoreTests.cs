@@ -1,6 +1,7 @@
 using System.Text;
 using Hangfire.Raft.Commands;
 using Hangfire.Raft.State;
+using TUnit.Assertions.Enums;
 
 namespace Hangfire.Raft.Tests;
 
@@ -27,74 +28,74 @@ public class RaftStoreTests
 
     // ----- jobs -----
 
-    [Fact]
-    public void CreateJob_StoresInvocationAndParameters()
+    [Test]
+    public async Task CreateJob_StoresInvocationAndParameters()
     {
         Apply(T0, NewJob("a"));
 
         var job = _store.GetJob("a");
-        Assert.NotNull(job);
-        Assert.Equal("payload-a", job.InvocationData);
-        Assert.Equal(T0, job.CreatedAt);
-        Assert.Equal(T0.AddDays(1), job.ExpireAt);
-        Assert.Equal("de-CH", job.Parameters["Culture"]);
-        Assert.Null(job.CurrentState);
-        Assert.Empty(job.History);
+        await Assert.That(job).IsNotNull();
+        await Assert.That(job.InvocationData).IsEqualTo("payload-a");
+        await Assert.That(job.CreatedAt).IsEqualTo(T0);
+        await Assert.That(job.ExpireAt).IsEqualTo(T0.AddDays(1));
+        await Assert.That(job.Parameters["Culture"]).IsEqualTo("de-CH");
+        await Assert.That(job.CurrentState).IsNull();
+        await Assert.That(job.History).IsEmpty();
     }
 
-    [Fact]
-    public void GetJob_ReturnsNull_WhenMissing() => Assert.Null(_store.GetJob("missing"));
+    [Test]
+    public async Task GetJob_ReturnsNull_WhenMissing() => await Assert.That(_store.GetJob("missing")).IsNull();
 
-    [Fact]
-    public void SetJobParameter_AddsOverwritesAndAllowsNull()
+    [Test]
+    public async Task SetJobParameter_AddsOverwritesAndAllowsNull()
     {
         Apply(T0, NewJob("a"));
         Apply(T0, new SetJobParameterOp("a", "X", "1"));
         Apply(T0, new SetJobParameterOp("a", "X", "2"));
         Apply(T0, new SetJobParameterOp("a", "N", null));
 
-        Assert.Equal("2", _store.GetJobParameter("a", "X"));
-        Assert.Null(_store.GetJobParameter("a", "N"));
-        Assert.Null(_store.GetJobParameter("a", "missing"));
-        Assert.Null(_store.GetJobParameter("missing", "X"));
+        await Assert.That(_store.GetJobParameter("a", "X")).IsEqualTo("2");
+        await Assert.That(_store.GetJobParameter("a", "N")).IsNull();
+        await Assert.That(_store.GetJobParameter("a", "missing")).IsNull();
+        await Assert.That(_store.GetJobParameter("missing", "X")).IsNull();
     }
 
-    [Fact]
-    public void SetJobParameter_IsNoOp_ForMissingJob()
+    [Test]
+    public async Task SetJobParameter_IsNoOp_ForMissingJob()
     {
         Apply(T0, new SetJobParameterOp("missing", "X", "1"));
-        Assert.Null(_store.GetJob("missing"));
+        await Assert.That(_store.GetJob("missing")).IsNull();
     }
 
-    [Fact]
-    public void SetJobState_UpdatesCurrentStateHistoryAndIndex()
+    [Test]
+    public async Task SetJobState_UpdatesCurrentStateHistoryAndIndex()
     {
         Apply(T0, NewJob("a"));
         Apply(T0, new SetJobStateOp("a", State("Enqueued", T0)));
         Apply(T0, new SetJobStateOp("a", State("Processing", T0.AddSeconds(1))));
 
         var job = _store.GetJob("a")!;
-        Assert.Equal("Processing", job.CurrentState!.Name);
-        Assert.Equal(2, job.History.Count);
-        Assert.Equal(0, _store.GetStateCount("Enqueued"));
-        Assert.Equal(1, _store.GetStateCount("Processing"));
+        await Assert.That(job.CurrentState!.Name).IsEqualTo("Processing");
+        await Assert.That(job.History.Count).IsEqualTo(2);
+        await Assert.That(_store.GetStateCount("Enqueued")).IsEqualTo(0);
+        await Assert.That(_store.GetStateCount("Processing")).IsEqualTo(1);
     }
 
-    [Fact]
-    public void AddJobState_AppendsHistoryWithoutChangingCurrentState()
+    [Test]
+    public async Task AddJobState_AppendsHistoryWithoutChangingCurrentState()
     {
         Apply(T0, NewJob("a"));
         Apply(T0, new SetJobStateOp("a", State("Enqueued", T0)));
         Apply(T0, new AddJobStateOp("a", State("Custom", T0.AddSeconds(1))));
 
         var job = _store.GetJob("a")!;
-        Assert.Equal("Enqueued", job.CurrentState!.Name);
-        Assert.Equal(2, job.History.Count);
-        Assert.Equal(0, _store.GetStateCount("Custom"));
+        await Assert.That(job.CurrentState!.Name).IsEqualTo("Enqueued");
+        await Assert.That(job.History.Count).IsEqualTo(2);
+        await Assert.That(_store.GetStateCount("Custom")).IsEqualTo(0);
     }
 
-    [Fact]
-    public void GetJobsByState_OrdersAndPages()
+    [Test]
+    public async Task GetJobsByState_OrdersAndPages()
     {
         for (var i = 0; i < 5; i++)
         {
@@ -104,20 +105,20 @@ public class RaftStoreTests
         }
 
         var ascending = _store.GetJobsByState("Succeeded", 0, 10, ascending: true).Select(j => j.Id).ToList();
-        Assert.Equal(["job-0", "job-1", "job-2", "job-3", "job-4"], ascending);
+        await Assert.That(ascending).IsEquivalentTo(["job-0", "job-1", "job-2", "job-3", "job-4"], CollectionOrdering.Matching);
 
         var newestFirst = _store.GetJobsByState("Succeeded", 0, 2, ascending: false).Select(j => j.Id).ToList();
-        Assert.Equal(["job-4", "job-3"], newestFirst);
+        await Assert.That(newestFirst).IsEquivalentTo(["job-4", "job-3"], CollectionOrdering.Matching);
 
         var page = _store.GetJobsByState("Succeeded", 2, 2, ascending: true).Select(j => j.Id).ToList();
-        Assert.Equal(["job-2", "job-3"], page);
+        await Assert.That(page).IsEquivalentTo(["job-2", "job-3"], CollectionOrdering.Matching);
 
-        Assert.Empty(_store.GetJobsByState("Succeeded", 10, 5, ascending: true));
-        Assert.Empty(_store.GetJobsByState("Unknown", 0, 5, ascending: true));
+        await Assert.That(_store.GetJobsByState("Succeeded", 10, 5, ascending: true)).IsEmpty();
+        await Assert.That(_store.GetJobsByState("Unknown", 0, 5, ascending: true)).IsEmpty();
     }
 
-    [Fact]
-    public void GetJobsByState_BreaksTimestampTiesById()
+    [Test]
+    public async Task GetJobsByState_BreaksTimestampTiesById()
     {
         foreach (var id in new[] { "b", "a", "c" })
         {
@@ -126,39 +127,39 @@ public class RaftStoreTests
         }
 
         var ids = _store.GetJobsByState("Scheduled", 0, 10, ascending: true).Select(j => j.Id).ToList();
-        Assert.Equal(["a", "b", "c"], ids);
+        await Assert.That(ids).IsEquivalentTo(["a", "b", "c"], CollectionOrdering.Matching);
     }
 
-    [Fact]
-    public void PersistJob_ClearsExpiry_AndExpireJobSetsIt()
+    [Test]
+    public async Task PersistJob_ClearsExpiry_AndExpireJobSetsIt()
     {
         Apply(T0, NewJob("a"));
         Apply(T0, new PersistJobOp("a"));
-        Assert.Null(_store.GetJob("a")!.ExpireAt);
+        await Assert.That(_store.GetJob("a")!.ExpireAt).IsNull();
 
         Apply(T0, new ExpireJobOp("a", T0.AddMinutes(30)));
-        Assert.Equal(T0.AddMinutes(30), _store.GetJob("a")!.ExpireAt);
+        await Assert.That(_store.GetJob("a")!.ExpireAt).IsEqualTo(T0.AddMinutes(30));
     }
 
-    [Fact]
-    public void Maintenance_EvictsExpiredJobs_AndTheirIndexEntries()
+    [Test]
+    public async Task Maintenance_EvictsExpiredJobs_AndTheirIndexEntries()
     {
         Apply(T0, NewJob("a"));
         Apply(T0, new SetJobStateOp("a", State("Succeeded", T0)));
         Apply(T0, new ExpireJobOp("a", T0.AddMinutes(1)));
 
         Apply(T0.AddSeconds(59), new MaintenanceOp(TimeSpan.FromMinutes(5)));
-        Assert.NotNull(_store.GetJob("a"));
+        await Assert.That(_store.GetJob("a")).IsNotNull();
 
         Apply(T0.AddMinutes(1), new MaintenanceOp(TimeSpan.FromMinutes(5)));
-        Assert.Null(_store.GetJob("a"));
-        Assert.Equal(0, _store.GetStateCount("Succeeded"));
+        await Assert.That(_store.GetJob("a")).IsNull();
+        await Assert.That(_store.GetStateCount("Succeeded")).IsEqualTo(0);
     }
 
     // ----- queues and fetching -----
 
-    [Fact]
-    public void Fetch_ReturnsJobsInFifoOrder()
+    [Test]
+    public async Task Fetch_ReturnsJobsInFifoOrder()
     {
         Apply(T0, NewJob("a"), NewJob("b"), new EnqueueOp("default", "a"), new EnqueueOp("default", "b"));
 
@@ -166,35 +167,35 @@ public class RaftStoreTests
         var second = (FetchResult?)Apply(T0, new FetchOp(["default"], Guid.NewGuid()));
         var third = (FetchResult?)Apply(T0, new FetchOp(["default"], Guid.NewGuid()));
 
-        Assert.Equal("a", first!.Value.JobId);
-        Assert.Equal("b", second!.Value.JobId);
-        Assert.Null(third);
+        await Assert.That(first!.Value.JobId).IsEqualTo("a");
+        await Assert.That(second!.Value.JobId).IsEqualTo("b");
+        await Assert.That(third).IsNull();
     }
 
-    [Fact]
-    public void Fetch_RespectsQueuePriorityOrder()
+    [Test]
+    public async Task Fetch_RespectsQueuePriorityOrder()
     {
         Apply(T0, NewJob("low"), NewJob("crit"),
             new EnqueueOp("default", "low"), new EnqueueOp("critical", "crit"));
 
         var fetched = (FetchResult?)Apply(T0, new FetchOp(["critical", "default"], Guid.NewGuid()));
 
-        Assert.Equal("crit", fetched!.Value.JobId);
-        Assert.Equal("critical", fetched.Value.Queue);
+        await Assert.That(fetched!.Value.JobId).IsEqualTo("crit");
+        await Assert.That(fetched.Value.Queue).IsEqualTo("critical");
     }
 
-    [Fact]
-    public void Fetch_SkipsJobsThatNoLongerExist()
+    [Test]
+    public async Task Fetch_SkipsJobsThatNoLongerExist()
     {
         Apply(T0, NewJob("alive"), new EnqueueOp("default", "ghost"), new EnqueueOp("default", "alive"));
 
         var fetched = (FetchResult?)Apply(T0, new FetchOp(["default"], Guid.NewGuid()));
 
-        Assert.Equal("alive", fetched!.Value.JobId);
+        await Assert.That(fetched!.Value.JobId).IsEqualTo("alive");
     }
 
-    [Fact]
-    public void RequeueFetched_PutsJobBackAtTheHead()
+    [Test]
+    public async Task RequeueFetched_PutsJobBackAtTheHead()
     {
         Apply(T0, NewJob("a"), NewJob("b"), new EnqueueOp("q", "a"), new EnqueueOp("q", "b"));
         var token = Guid.NewGuid();
@@ -202,13 +203,13 @@ public class RaftStoreTests
 
         var effects = ApplyWithEffects(T0, new RequeueFetchedOp(token));
 
-        Assert.Contains("q", effects.SignaledQueues!);
+        await Assert.That(effects.SignaledQueues!).Contains("q");
         var next = (FetchResult?)Apply(T0, new FetchOp(["q"], Guid.NewGuid()));
-        Assert.Equal("a", next!.Value.JobId);
+        await Assert.That(next!.Value.JobId).IsEqualTo("a");
     }
 
-    [Fact]
-    public void AckFetched_RemovesTheLease()
+    [Test]
+    public async Task AckFetched_RemovesTheLease()
     {
         Apply(T0, NewJob("a"), new EnqueueOp("q", "a"));
         var token = Guid.NewGuid();
@@ -216,12 +217,12 @@ public class RaftStoreTests
 
         Apply(T0, new AckFetchedOp(token));
 
-        Assert.Equal(0, _store.GetFetchedCount("q"));
-        Assert.False((bool)Apply(T0, new RenewFetchedOp(token))!);
+        await Assert.That(_store.GetFetchedCount("q")).IsEqualTo(0);
+        await Assert.That((bool)Apply(T0, new RenewFetchedOp(token))!).IsFalse();
     }
 
-    [Fact]
-    public void Maintenance_ReclaimsStaleFetches_ButNotRenewedOnes()
+    [Test]
+    public async Task Maintenance_ReclaimsStaleFetches_ButNotRenewedOnes()
     {
         Apply(T0, NewJob("stale"), NewJob("active"), new EnqueueOp("q", "stale"), new EnqueueOp("q", "active"));
         var staleToken = Guid.NewGuid();
@@ -229,53 +230,53 @@ public class RaftStoreTests
         Apply(T0, new FetchOp(["q"], staleToken));
         Apply(T0, new FetchOp(["q"], activeToken));
 
-        Assert.True((bool)Apply(T0.AddMinutes(4), new RenewFetchedOp(activeToken))!);
+        await Assert.That((bool)Apply(T0.AddMinutes(4), new RenewFetchedOp(activeToken))!).IsTrue();
 
         var effects = ApplyWithEffects(T0.AddMinutes(5), new MaintenanceOp(TimeSpan.FromMinutes(5)));
 
-        Assert.Contains("q", effects.SignaledQueues!);
-        Assert.Equal(1, _store.GetFetchedCount("q")); // the renewed lease survives
+        await Assert.That(effects.SignaledQueues!).Contains("q");
+        await Assert.That(_store.GetFetchedCount("q")).IsEqualTo(1); // the renewed lease survives
         var reclaimed = (FetchResult?)Apply(T0.AddMinutes(5), new FetchOp(["q"], Guid.NewGuid()));
-        Assert.Equal("stale", reclaimed!.Value.JobId);
+        await Assert.That(reclaimed!.Value.JobId).IsEqualTo("stale");
     }
 
-    [Fact]
-    public void Enqueue_SignalsTheQueue()
+    [Test]
+    public async Task Enqueue_SignalsTheQueue()
     {
         Apply(T0, NewJob("a"));
         var effects = ApplyWithEffects(T0, new EnqueueOp("q", "a"));
-        Assert.Contains("q", effects.SignaledQueues!);
+        await Assert.That(effects.SignaledQueues!).Contains("q");
     }
 
     // ----- counters -----
 
-    [Fact]
-    public void Counters_AccumulateAndVanishAtZeroWithoutExpiry()
+    [Test]
+    public async Task Counters_AccumulateAndVanishAtZeroWithoutExpiry()
     {
         Apply(T0, new IncrementCounterOp("c", 1, null), new IncrementCounterOp("c", 1, null));
-        Assert.Equal(2, _store.GetCounter("c"));
+        await Assert.That(_store.GetCounter("c")).IsEqualTo(2);
 
         Apply(T0, new IncrementCounterOp("c", -2, null));
-        Assert.Equal(0, _store.GetCounter("c"));
+        await Assert.That(_store.GetCounter("c")).IsEqualTo(0);
     }
 
-    [Fact]
-    public void Counters_ExpiryOnlyExtends()
+    [Test]
+    public async Task Counters_ExpiryOnlyExtends()
     {
         Apply(T0, new IncrementCounterOp("c", 1, T0.AddHours(2)));
         Apply(T0, new IncrementCounterOp("c", 1, T0.AddHours(1)));
 
         Apply(T0.AddMinutes(90), new MaintenanceOp(TimeSpan.FromMinutes(5)));
-        Assert.Equal(2, _store.GetCounter("c")); // still alive: the later, shorter expiry did not shrink the TTL
+        await Assert.That(_store.GetCounter("c")).IsEqualTo(2); // still alive: the later, shorter expiry did not shrink the TTL
 
         Apply(T0.AddHours(2), new MaintenanceOp(TimeSpan.FromMinutes(5)));
-        Assert.Equal(0, _store.GetCounter("c"));
+        await Assert.That(_store.GetCounter("c")).IsEqualTo(0);
     }
 
     // ----- sets -----
 
-    [Fact]
-    public void Sets_UpsertScore_AndOrderByScoreThenValue()
+    [Test]
+    public async Task Sets_UpsertScore_AndOrderByScoreThenValue()
     {
         Apply(T0,
             new AddToSetOp("s", "b", 2),
@@ -283,216 +284,216 @@ public class RaftStoreTests
             new AddToSetOp("s", "c", 1),
             new AddToSetOp("s", "b", 0.5)); // moves b to the front
 
-        Assert.Equal(["b", "c", "a"], _store.GetRangeFromSet("s", 0, 10));
-        Assert.Equal(3, _store.GetSetCount("s"));
+        await Assert.That(_store.GetRangeFromSet("s", 0, 10)).IsEquivalentTo(["b", "c", "a"], CollectionOrdering.Matching);
+        await Assert.That(_store.GetSetCount("s")).IsEqualTo(3);
     }
 
-    [Fact]
-    public void GetFirstByLowestScoreFromSet_RespectsInclusiveBoundsAndCount()
+    [Test]
+    public async Task GetFirstByLowestScoreFromSet_RespectsInclusiveBoundsAndCount()
     {
         Apply(T0, new AddToSetOp("s", "a", 1), new AddToSetOp("s", "b", 2), new AddToSetOp("s", "c", 3));
 
-        Assert.Equal(["a", "b"], _store.GetFirstByLowestScoreFromSet("s", 1, 2, 10));
-        Assert.Equal(["a"], _store.GetFirstByLowestScoreFromSet("s", 1, 3, 1));
-        Assert.Empty(_store.GetFirstByLowestScoreFromSet("s", 4, 9, 10));
-        Assert.Empty(_store.GetFirstByLowestScoreFromSet("missing", 0, 10, 10));
+        await Assert.That(_store.GetFirstByLowestScoreFromSet("s", 1, 2, 10)).IsEquivalentTo(["a", "b"], CollectionOrdering.Matching);
+        await Assert.That(_store.GetFirstByLowestScoreFromSet("s", 1, 3, 1)).IsEquivalentTo(["a"], CollectionOrdering.Matching);
+        await Assert.That(_store.GetFirstByLowestScoreFromSet("s", 4, 9, 10)).IsEmpty();
+        await Assert.That(_store.GetFirstByLowestScoreFromSet("missing", 0, 10, 10)).IsEmpty();
     }
 
-    [Fact]
-    public void Sets_RemoveValue_DropsEmptySet()
+    [Test]
+    public async Task Sets_RemoveValue_DropsEmptySet()
     {
         Apply(T0, new AddToSetOp("s", "a", 1));
         Apply(T0, new RemoveFromSetOp("s", "a"));
 
-        Assert.Equal(0, _store.GetSetCount("s"));
-        Assert.False(_store.GetSetContains("s", "a"));
+        await Assert.That(_store.GetSetCount("s")).IsEqualTo(0);
+        await Assert.That(_store.GetSetContains("s", "a")).IsFalse();
     }
 
-    [Fact]
-    public void Sets_AddRange_UsesScoreZero()
+    [Test]
+    public async Task Sets_AddRange_UsesScoreZero()
     {
         Apply(T0, new AddRangeToSetOp("s", ["x", "y"]));
-        Assert.Equal(["x", "y"], _store.GetFirstByLowestScoreFromSet("s", 0, 0, 10));
+        await Assert.That(_store.GetFirstByLowestScoreFromSet("s", 0, 0, 10)).IsEquivalentTo(["x", "y"], CollectionOrdering.Matching);
     }
 
-    [Fact]
-    public void GetSetCount_WithLimit_Caps()
+    [Test]
+    public async Task GetSetCount_WithLimit_Caps()
     {
         Apply(T0, new AddRangeToSetOp("s1", ["a", "b"]), new AddRangeToSetOp("s2", ["c", "d"]));
-        Assert.Equal(3, _store.GetSetCount(["s1", "s2"], 3));
-        Assert.Equal(4, _store.GetSetCount(["s1", "s2"], 100));
+        await Assert.That(_store.GetSetCount(["s1", "s2"], 3)).IsEqualTo(3);
+        await Assert.That(_store.GetSetCount(["s1", "s2"], 100)).IsEqualTo(4);
     }
 
-    [Fact]
-    public void Sets_ExpireAndPersist_ControlEviction()
+    [Test]
+    public async Task Sets_ExpireAndPersist_ControlEviction()
     {
         Apply(T0, new AddToSetOp("s", "a", 1), new ExpireSetOp("s", T0.AddMinutes(1)));
-        Assert.True(_store.GetSetTtl("s", T0) > TimeSpan.Zero);
+        await Assert.That(_store.GetSetTtl("s", T0) > TimeSpan.Zero).IsTrue();
 
         Apply(T0, new PersistSetOp("s"));
-        Assert.True(_store.GetSetTtl("s", T0) < TimeSpan.Zero);
+        await Assert.That(_store.GetSetTtl("s", T0) < TimeSpan.Zero).IsTrue();
 
         Apply(T0, new ExpireSetOp("s", T0.AddMinutes(1)));
         Apply(T0.AddMinutes(2), new MaintenanceOp(TimeSpan.FromMinutes(5)));
-        Assert.Equal(0, _store.GetSetCount("s"));
+        await Assert.That(_store.GetSetCount("s")).IsEqualTo(0);
     }
 
     // ----- lists -----
 
-    [Fact]
-    public void Lists_AreNewestFirst()
+    [Test]
+    public async Task Lists_AreNewestFirst()
     {
         Apply(T0, new InsertToListOp("l", "first"), new InsertToListOp("l", "second"));
 
-        Assert.Equal(["second", "first"], _store.GetAllItemsFromList("l"));
-        Assert.Equal(["second"], _store.GetRangeFromList("l", 0, 0));
-        Assert.Equal(2, _store.GetListCount("l"));
+        await Assert.That(_store.GetAllItemsFromList("l")).IsEquivalentTo(["second", "first"], CollectionOrdering.Matching);
+        await Assert.That(_store.GetRangeFromList("l", 0, 0)).IsEquivalentTo(["second"], CollectionOrdering.Matching);
+        await Assert.That(_store.GetListCount("l")).IsEqualTo(2);
     }
 
-    [Fact]
-    public void Lists_RemoveDeletesAllOccurrences_AndDropsEmptyList()
+    [Test]
+    public async Task Lists_RemoveDeletesAllOccurrences_AndDropsEmptyList()
     {
         Apply(T0, new InsertToListOp("l", "x"), new InsertToListOp("l", "y"), new InsertToListOp("l", "x"));
         Apply(T0, new RemoveFromListOp("l", "x"));
-        Assert.Equal(["y"], _store.GetAllItemsFromList("l"));
+        await Assert.That(_store.GetAllItemsFromList("l")).IsEquivalentTo(["y"], CollectionOrdering.Matching);
 
         Apply(T0, new RemoveFromListOp("l", "y"));
-        Assert.Equal(0, _store.GetListCount("l"));
+        await Assert.That(_store.GetListCount("l")).IsEqualTo(0);
     }
 
-    [Fact]
-    public void Lists_ExpireAndPersist_ControlEviction()
+    [Test]
+    public async Task Lists_ExpireAndPersist_ControlEviction()
     {
         Apply(T0, new InsertToListOp("l", "x"), new ExpireListOp("l", T0.AddMinutes(1)));
-        Assert.True(_store.GetListTtl("l", T0) > TimeSpan.Zero);
+        await Assert.That(_store.GetListTtl("l", T0) > TimeSpan.Zero).IsTrue();
 
         Apply(T0, new PersistListOp("l"));
-        Assert.True(_store.GetListTtl("l", T0) < TimeSpan.Zero);
+        await Assert.That(_store.GetListTtl("l", T0) < TimeSpan.Zero).IsTrue();
         Apply(T0.AddMinutes(2), new MaintenanceOp(TimeSpan.FromMinutes(5)));
-        Assert.Equal(1, _store.GetListCount("l")); // persisted: survives
+        await Assert.That(_store.GetListCount("l")).IsEqualTo(1); // persisted: survives
 
         Apply(T0, new ExpireListOp("l", T0.AddMinutes(1)));
         Apply(T0.AddMinutes(1), new MaintenanceOp(TimeSpan.FromMinutes(5)));
-        Assert.Equal(0, _store.GetListCount("l"));
+        await Assert.That(_store.GetListCount("l")).IsEqualTo(0);
     }
 
-    [Fact]
-    public void TrimList_KeepsInclusiveRangeOfNewestFirstView()
+    [Test]
+    public async Task TrimList_KeepsInclusiveRangeOfNewestFirstView()
     {
         Apply(T0,
             new InsertToListOp("l", "1"), new InsertToListOp("l", "2"),
             new InsertToListOp("l", "3"), new InsertToListOp("l", "4")); // list: 4,3,2,1
 
         Apply(T0, new TrimListOp("l", 1, 2));
-        Assert.Equal(["3", "2"], _store.GetAllItemsFromList("l"));
+        await Assert.That(_store.GetAllItemsFromList("l")).IsEquivalentTo(["3", "2"], CollectionOrdering.Matching);
 
         Apply(T0, new TrimListOp("l", 5, 9));
-        Assert.Equal(0, _store.GetListCount("l"));
+        await Assert.That(_store.GetListCount("l")).IsEqualTo(0);
     }
 
     // ----- hashes -----
 
-    [Fact]
-    public void Hashes_MergeFields_AndSupportNullValues()
+    [Test]
+    public async Task Hashes_MergeFields_AndSupportNullValues()
     {
         Apply(T0, new SetRangeInHashOp("h", [new("a", "1"), new("b", null)]));
         Apply(T0, new SetRangeInHashOp("h", [new("a", "2"), new("c", "3")]));
 
         var fields = _store.GetAllEntriesFromHash("h")!;
-        Assert.Equal("2", fields["a"]);
-        Assert.Null(fields["b"]);
-        Assert.Equal("3", fields["c"]);
-        Assert.Equal(3, _store.GetHashCount("h"));
-        Assert.Equal("3", _store.GetValueFromHash("h", "c"));
-        Assert.Null(_store.GetAllEntriesFromHash("missing"));
+        await Assert.That(fields["a"]).IsEqualTo("2");
+        await Assert.That(fields["b"]).IsNull();
+        await Assert.That(fields["c"]).IsEqualTo("3");
+        await Assert.That(_store.GetHashCount("h")).IsEqualTo(3);
+        await Assert.That(_store.GetValueFromHash("h", "c")).IsEqualTo("3");
+        await Assert.That(_store.GetAllEntriesFromHash("missing")).IsNull();
     }
 
-    [Fact]
-    public void Hashes_RemoveAndExpire()
+    [Test]
+    public async Task Hashes_RemoveAndExpire()
     {
         Apply(T0, new SetRangeInHashOp("h", [new("a", "1")]), new ExpireHashOp("h", T0.AddMinutes(1)));
         Apply(T0.AddMinutes(1), new MaintenanceOp(TimeSpan.FromMinutes(5)));
-        Assert.Equal(0, _store.GetHashCount("h"));
+        await Assert.That(_store.GetHashCount("h")).IsEqualTo(0);
 
         Apply(T0, new SetRangeInHashOp("h2", [new("a", "1")]));
         Apply(T0, new RemoveHashOp("h2"));
-        Assert.Null(_store.GetAllEntriesFromHash("h2"));
+        await Assert.That(_store.GetAllEntriesFromHash("h2")).IsNull();
     }
 
     // ----- servers -----
 
-    [Fact]
-    public void Servers_AnnounceHeartbeatAndTimeout()
+    [Test]
+    public async Task Servers_AnnounceHeartbeatAndTimeout()
     {
         Apply(T0, new AnnounceServerOp("srv-1", 8, ["default"]));
-        Assert.True((bool)Apply(T0.AddMinutes(1), new HeartbeatOp("srv-1"))!);
-        Assert.False((bool)Apply(T0, new HeartbeatOp("unknown"))!);
+        await Assert.That((bool)Apply(T0.AddMinutes(1), new HeartbeatOp("srv-1"))!).IsTrue();
+        await Assert.That((bool)Apply(T0, new HeartbeatOp("unknown"))!).IsFalse();
 
         // heartbeat at T0+1min; timeout 5min; at T0+6min the server is exactly at the cutoff and survives
-        Assert.Equal(0, (int)Apply(T0.AddMinutes(6), new RemoveTimedOutServersOp(TimeSpan.FromMinutes(5)))!);
-        Assert.Equal(1, (int)Apply(T0.AddMinutes(7), new RemoveTimedOutServersOp(TimeSpan.FromMinutes(5)))!);
-        Assert.Empty(_store.GetServers());
+        await Assert.That((int)Apply(T0.AddMinutes(6), new RemoveTimedOutServersOp(TimeSpan.FromMinutes(5)))!).IsEqualTo(0);
+        await Assert.That((int)Apply(T0.AddMinutes(7), new RemoveTimedOutServersOp(TimeSpan.FromMinutes(5)))!).IsEqualTo(1);
+        await Assert.That(_store.GetServers()).IsEmpty();
     }
 
-    [Fact]
-    public void Servers_ReannounceReplaces()
+    [Test]
+    public async Task Servers_ReannounceReplaces()
     {
         Apply(T0, new AnnounceServerOp("srv-1", 8, ["default"]));
         Apply(T0.AddMinutes(1), new AnnounceServerOp("srv-1", 16, ["critical"]));
 
-        var server = Assert.Single(_store.GetServers());
-        Assert.Equal(16, server.WorkerCount);
-        Assert.Equal(["critical"], server.Queues);
-        Assert.Equal(T0.AddMinutes(1), server.StartedAt);
+        var server = await Assert.That(_store.GetServers()).HasSingleItem();
+        await Assert.That(server.WorkerCount).IsEqualTo(16);
+        await Assert.That(server.Queues).IsEquivalentTo(["critical"], CollectionOrdering.Matching);
+        await Assert.That(server.StartedAt).IsEqualTo(T0.AddMinutes(1));
     }
 
     // ----- locks -----
 
-    [Fact]
-    public void Locks_MutualExclusion_SameOwnerRenews_ExpiryFrees()
+    [Test]
+    public async Task Locks_MutualExclusion_SameOwnerRenews_ExpiryFrees()
     {
         var owner1 = Guid.NewGuid();
         var owner2 = Guid.NewGuid();
         var lease = TimeSpan.FromMinutes(2);
 
-        Assert.True((bool)Apply(T0, new TryAcquireLockOp("r", owner1, lease))!);
-        Assert.False((bool)Apply(T0, new TryAcquireLockOp("r", owner2, lease))!);
-        Assert.True((bool)Apply(T0.AddMinutes(1), new TryAcquireLockOp("r", owner1, lease))!); // renewal extends to T0+3min
+        await Assert.That((bool)Apply(T0, new TryAcquireLockOp("r", owner1, lease))!).IsTrue();
+        await Assert.That((bool)Apply(T0, new TryAcquireLockOp("r", owner2, lease))!).IsFalse();
+        await Assert.That((bool)Apply(T0.AddMinutes(1), new TryAcquireLockOp("r", owner1, lease))!).IsTrue(); // renewal extends to T0+3min
 
-        Assert.False((bool)Apply(T0.AddMinutes(2.5), new TryAcquireLockOp("r", owner2, lease))!);
-        Assert.True((bool)Apply(T0.AddMinutes(3), new TryAcquireLockOp("r", owner2, lease))!); // lease expired
+        await Assert.That((bool)Apply(T0.AddMinutes(2.5), new TryAcquireLockOp("r", owner2, lease))!).IsFalse();
+        await Assert.That((bool)Apply(T0.AddMinutes(3), new TryAcquireLockOp("r", owner2, lease))!).IsTrue(); // lease expired
     }
 
-    [Fact]
-    public void Locks_ReleaseByOwnerOnly_AndSignals()
+    [Test]
+    public async Task Locks_ReleaseByOwnerOnly_AndSignals()
     {
         var owner = Guid.NewGuid();
         var other = Guid.NewGuid();
         Apply(T0, new TryAcquireLockOp("r", owner, TimeSpan.FromMinutes(2)));
 
         var foreignRelease = ApplyWithEffects(T0, new ReleaseLockOp("r", other));
-        Assert.False(foreignRelease.LocksReleased);
-        Assert.False((bool)Apply(T0, new TryAcquireLockOp("r", other, TimeSpan.FromMinutes(2)))!);
+        await Assert.That(foreignRelease.LocksReleased).IsFalse();
+        await Assert.That((bool)Apply(T0, new TryAcquireLockOp("r", other, TimeSpan.FromMinutes(2)))!).IsFalse();
 
         var ownerRelease = ApplyWithEffects(T0, new ReleaseLockOp("r", owner));
-        Assert.True(ownerRelease.LocksReleased);
-        Assert.True((bool)Apply(T0, new TryAcquireLockOp("r", other, TimeSpan.FromMinutes(2)))!);
+        await Assert.That(ownerRelease.LocksReleased).IsTrue();
+        await Assert.That((bool)Apply(T0, new TryAcquireLockOp("r", other, TimeSpan.FromMinutes(2)))!).IsTrue();
     }
 
-    [Fact]
-    public void Maintenance_DropsExpiredLocks()
+    [Test]
+    public async Task Maintenance_DropsExpiredLocks()
     {
         Apply(T0, new TryAcquireLockOp("r", Guid.NewGuid(), TimeSpan.FromMinutes(2)));
         var effects = ApplyWithEffects(T0.AddMinutes(2), new MaintenanceOp(TimeSpan.FromMinutes(5)));
 
-        Assert.True(effects.LocksReleased);
-        Assert.True((bool)Apply(T0.AddMinutes(2), new TryAcquireLockOp("r", Guid.NewGuid(), TimeSpan.FromMinutes(2)))!);
+        await Assert.That(effects.LocksReleased).IsTrue();
+        await Assert.That((bool)Apply(T0.AddMinutes(2), new TryAcquireLockOp("r", Guid.NewGuid(), TimeSpan.FromMinutes(2)))!).IsTrue();
     }
 
     // ----- statistics -----
 
-    [Fact]
-    public void Statistics_AggregateAcrossTables()
+    [Test]
+    public async Task Statistics_AggregateAcrossTables()
     {
         Apply(T0,
             NewJob("e"), new EnqueueOp("default", "e"),
@@ -506,16 +507,16 @@ public class RaftStoreTests
             new AnnounceServerOp("srv", 4, ["default"]));
 
         var stats = _store.GetStatistics();
-        Assert.Equal(1, stats.Servers);
-        Assert.Equal(1, stats.Queues);
-        Assert.Equal(1, stats.Enqueued);
-        Assert.Equal(1, stats.Scheduled);
-        Assert.Equal(1, stats.Processing);
-        Assert.Equal(1, stats.Failed);
-        Assert.Equal(7, stats.Succeeded);
-        Assert.Equal(2, stats.Deleted);
-        Assert.Equal(1, stats.Recurring);
-        Assert.Equal(1, stats.Retries);
+        await Assert.That(stats.Servers).IsEqualTo(1);
+        await Assert.That(stats.Queues).IsEqualTo(1);
+        await Assert.That(stats.Enqueued).IsEqualTo(1);
+        await Assert.That(stats.Scheduled).IsEqualTo(1);
+        await Assert.That(stats.Processing).IsEqualTo(1);
+        await Assert.That(stats.Failed).IsEqualTo(1);
+        await Assert.That(stats.Succeeded).IsEqualTo(7);
+        await Assert.That(stats.Deleted).IsEqualTo(2);
+        await Assert.That(stats.Recurring).IsEqualTo(1);
+        await Assert.That(stats.Retries).IsEqualTo(1);
     }
 
     // ----- exhaustiveness -----
@@ -525,8 +526,8 @@ public class RaftStoreTests
     /// from a committed log entry, which would brick every node of a real cluster, so this is the
     /// most important regression test in the suite.
     /// </summary>
-    [Fact]
-    public void EveryOpType_HasAnApplyHandler()
+    [Test]
+    public async Task EveryOpType_HasAnApplyHandler()
     {
         var token = Guid.NewGuid();
         var owner = Guid.NewGuid();
@@ -573,7 +574,7 @@ public class RaftStoreTests
             .ToHashSet();
         var covered = ops.Select(o => o.GetType()).ToHashSet();
         var missing = allOpTypes.Except(covered).Select(t => t.Name).ToList();
-        Assert.True(missing.Count == 0, $"Ops missing from the apply-handler test: {string.Join(", ", missing)}");
+        await Assert.That(missing).IsEmpty(); // failure lists the ops missing from the apply-handler test
 
         foreach (var op in ops) Apply(T0, op);
     }
@@ -585,8 +586,8 @@ public class RaftStoreTests
     /// layout than a node that built them incrementally. Maintenance must still requeue stale
     /// fetches in the same order on both, otherwise the replicated queues diverge.
     /// </summary>
-    [Fact]
-    public void Maintenance_RequeuesStaleFetches_IdenticallyAfterSnapshotRestore()
+    [Test]
+    public async Task Maintenance_RequeuesStaleFetches_IdenticallyAfterSnapshotRestore()
     {
         Apply(T0, NewJob("a"), NewJob("b"), NewJob("c"), NewJob("d"),
             new EnqueueOp("q", "a"), new EnqueueOp("q", "b"), new EnqueueOp("q", "c"), new EnqueueOp("q", "d"));
@@ -616,25 +617,25 @@ public class RaftStoreTests
         _store.Apply(maintenance);
         restored.Apply(maintenance);
 
-        Assert.Equal(3, _store.GetQueueLength("q"));
-        Assert.Equal(_store.GetEnqueuedJobIds("q", 0, 10), restored.GetEnqueuedJobIds("q", 0, 10));
+        await Assert.That(_store.GetQueueLength("q")).IsEqualTo(3);
+        await Assert.That(restored.GetEnqueuedJobIds("q", 0, 10)).IsEquivalentTo(_store.GetEnqueuedJobIds("q", 0, 10), CollectionOrdering.Matching);
     }
 
-    [Fact]
-    public void Maintenance_RemovesEmptyQueues()
+    [Test]
+    public async Task Maintenance_RemovesEmptyQueues()
     {
         Apply(T0, NewJob("a"), new EnqueueOp("q", "a"));
         Apply(T0, new FetchOp(["q"], Guid.NewGuid()));
 
         Apply(T0, new MaintenanceOp(TimeSpan.FromMinutes(5)));
 
-        Assert.Empty(_store.GetQueues(5));
+        await Assert.That(_store.GetQueues(5)).IsEmpty();
     }
 
     // ----- snapshot -----
 
-    [Fact]
-    public void Snapshot_RoundtripsTheEntireState()
+    [Test]
+    public async Task Snapshot_RoundtripsTheEntireState()
     {
         Apply(T0,
             NewJob("a"), new SetJobStateOp("a", State("Succeeded", T0, "done")),
@@ -655,42 +656,42 @@ public class RaftStoreTests
         }
 
         // A second serialization of the restored store must be byte-identical.
-        Assert.Equal(snapshot, Serialize(restored));
+        await Assert.That(Serialize(restored)).IsEquivalentTo(snapshot, CollectionOrdering.Matching);
 
         var job = restored.GetJob("a")!;
-        Assert.Equal("Succeeded", job.CurrentState!.Name);
-        Assert.Equal("done", job.CurrentState.Reason);
-        Assert.Equal(1, restored.GetStateCount("Succeeded")); // index rebuilt on load
-        Assert.Equal(1, restored.GetFetchedCount("default"));
-        Assert.Equal(["a"], restored.GetFirstByLowestScoreFromSet("schedule", 0, 200, 10));
-        Assert.Equal(["line"], restored.GetAllItemsFromList("console"));
-        Assert.Null(restored.GetAllEntriesFromHash("recurring-job:x")!["Null"]);
-        Assert.Equal(5, restored.GetCounter("stats:succeeded"));
-        Assert.Single(restored.GetServers());
-        Assert.Equal(0, restored.GetQueueLength("default")); // b was fetched
+        await Assert.That(job.CurrentState!.Name).IsEqualTo("Succeeded");
+        await Assert.That(job.CurrentState.Reason).IsEqualTo("done");
+        await Assert.That(restored.GetStateCount("Succeeded")).IsEqualTo(1); // index rebuilt on load
+        await Assert.That(restored.GetFetchedCount("default")).IsEqualTo(1);
+        await Assert.That(restored.GetFirstByLowestScoreFromSet("schedule", 0, 200, 10)).IsEquivalentTo(["a"], CollectionOrdering.Matching);
+        await Assert.That(restored.GetAllItemsFromList("console")).IsEquivalentTo(["line"], CollectionOrdering.Matching);
+        await Assert.That(restored.GetAllEntriesFromHash("recurring-job:x")!["Null"]).IsNull();
+        await Assert.That(restored.GetCounter("stats:succeeded")).IsEqualTo(5);
+        await Assert.That(restored.GetServers()).HasSingleItem();
+        await Assert.That(restored.GetQueueLength("default")).IsEqualTo(0); // b was fetched
     }
 
     // ----- read boundaries and op edge cases -----
 
-    [Fact]
-    public void GetRangeFromList_ClampsNegativeStart_AndHandlesEmptyRange()
+    [Test]
+    public async Task GetRangeFromList_ClampsNegativeStart_AndHandlesEmptyRange()
     {
         Apply(T0, new InsertToListOp("l", "a"), new InsertToListOp("l", "b")); // newest-first: b, a
 
-        Assert.Equal(["b", "a"], _store.GetRangeFromList("l", -5, 10)); // negative start clamps to 0
-        Assert.Empty(_store.GetRangeFromList("l", 5, 1));               // from > to
-        Assert.Equal(["b", "a"], _store.GetRangeFromList("l", 0, 99)); // past-end upper bound
+        await Assert.That(_store.GetRangeFromList("l", -5, 10)).IsEquivalentTo(["b", "a"], CollectionOrdering.Matching); // negative start clamps to 0
+        await Assert.That(_store.GetRangeFromList("l", 5, 1)).IsEmpty();               // from > to
+        await Assert.That(_store.GetRangeFromList("l", 0, 99)).IsEquivalentTo(["b", "a"], CollectionOrdering.Matching); // past-end upper bound
     }
 
-    [Fact]
-    public void RequeueFetched_UnknownToken_IsNoOp()
+    [Test]
+    public async Task RequeueFetched_UnknownToken_IsNoOp()
     {
         var effects = ApplyWithEffects(T0, new RequeueFetchedOp(Guid.NewGuid()));
-        Assert.Null(effects.SignaledQueues);
+        await Assert.That(effects.SignaledQueues).IsNull();
     }
 
-    [Fact]
-    public void Maintenance_DoesNotEvict_AFetchedJob()
+    [Test]
+    public async Task Maintenance_DoesNotEvict_AFetchedJob()
     {
         // A job that expires WHILE held under a fetch lease must not be evicted out from under the
         // worker; otherwise an ExpireJob racing an in-flight fetch would drop it with zero runs.
@@ -700,66 +701,68 @@ public class RaftStoreTests
 
         // Past the job's expiry, but the lease is still fresh: maintenance keeps the fetched job.
         Apply(T0.AddMinutes(2), new MaintenanceOp(TimeSpan.FromMinutes(5)));
-        Assert.NotNull(_store.GetJob("a"));
+        await Assert.That(_store.GetJob("a")).IsNotNull();
 
         // Releasing the lease re-enqueues it (the job still exists), so it can still run.
         Apply(T0.AddMinutes(2), new RequeueFetchedOp(token));
-        Assert.Equal(1, _store.GetQueueLength("q"));
+        await Assert.That(_store.GetQueueLength("q")).IsEqualTo(1);
     }
 
-    [Fact]
-    public void Counter_IsRecreated_AfterReachingZero()
+    [Test]
+    public async Task Counter_IsRecreated_AfterReachingZero()
     {
         Apply(T0, new IncrementCounterOp("c", 1, null));
         Apply(T0, new IncrementCounterOp("c", -1, null)); // back to zero -> entry removed
-        Assert.Equal(0, _store.GetCounter("c"));
+        await Assert.That(_store.GetCounter("c")).IsEqualTo(0);
 
         Apply(T0, new IncrementCounterOp("c", 1, null));   // re-created from nothing
-        Assert.Equal(1, _store.GetCounter("c"));
+        await Assert.That(_store.GetCounter("c")).IsEqualTo(1);
     }
 
-    [Fact]
-    public void RemoveServer_RemovesOnlyThatServer()
+    [Test]
+    public async Task RemoveServer_RemovesOnlyThatServer()
     {
         Apply(T0, new AnnounceServerOp("a", 1, []), new AnnounceServerOp("b", 1, []));
         Apply(T0, new RemoveServerOp("a"));
-        Assert.Equal("b", Assert.Single(_store.GetServers()).Id);
+        var single = await Assert.That(_store.GetServers()).HasSingleItem();
+        await Assert.That(single.Id).IsEqualTo("b");
     }
 
-    [Fact]
-    public void RemoveTimedOutServers_RemovesOnlyStaleServers()
+    [Test]
+    public async Task RemoveTimedOutServers_RemovesOnlyStaleServers()
     {
         Apply(T0, new AnnounceServerOp("stale", 1, []));
         Apply(T0.AddMinutes(10), new AnnounceServerOp("fresh", 1, []));
 
         var removed = (int)Apply(T0.AddMinutes(11), new RemoveTimedOutServersOp(TimeSpan.FromMinutes(5)))!;
-        Assert.Equal(1, removed);
-        Assert.Equal("fresh", Assert.Single(_store.GetServers()).Id);
+        await Assert.That(removed).IsEqualTo(1);
+        var single = await Assert.That(_store.GetServers()).HasSingleItem();
+        await Assert.That(single.Id).IsEqualTo("fresh");
     }
 
     // ----- snapshot edge cases -----
 
-    [Fact]
-    public void LoadSnapshot_Throws_OnUnknownVersion()
+    [Test]
+    public async Task LoadSnapshot_Throws_OnUnknownVersion()
     {
         var snapshot = Serialize(_store);
         snapshot[0] = 0xFF; // corrupt the version byte
         var other = new RaftStore();
         using var reader = new BinaryReader(new MemoryStream(snapshot), Encoding.UTF8);
-        Assert.Throws<NotSupportedException>(() => other.LoadSnapshot(reader));
+        await Assert.That(() => other.LoadSnapshot(reader)).ThrowsExactly<NotSupportedException>();
     }
 
-    [Fact]
-    public void Snapshot_RoundtripsAnEmptyStore()
+    [Test]
+    public async Task Snapshot_RoundtripsAnEmptyStore()
     {
         var snapshot = Serialize(_store); // brand-new, every table empty
         var other = new RaftStore();
         using (var reader = new BinaryReader(new MemoryStream(snapshot), Encoding.UTF8)) other.LoadSnapshot(reader);
-        Assert.Equal(snapshot, Serialize(other)); // every zero-count table prefix round-trips
+        await Assert.That(Serialize(other)).IsEquivalentTo(snapshot, CollectionOrdering.Matching); // every zero-count table prefix round-trips
     }
 
-    [Fact]
-    public void LoadSnapshot_Throws_OnTruncatedSnapshot()
+    [Test]
+    public async Task LoadSnapshot_Throws_OnTruncatedSnapshot()
     {
         Apply(T0, NewJob("a"), new EnqueueOp("q", "a"), new AddToSetOp("s", "v", 1));
         var snapshot = Serialize(_store);
@@ -768,11 +771,11 @@ public class RaftStoreTests
         var other = new RaftStore();
         using var reader = new BinaryReader(new MemoryStream(truncated), Encoding.UTF8);
         // A corrupt/partial snapshot must fail loudly (EndOfStream/InvalidData), not load partial state.
-        Assert.ThrowsAny<Exception>(() => other.LoadSnapshot(reader));
+        await Assert.That(() => other.LoadSnapshot(reader)).Throws<Exception>();
     }
 
-    [Fact]
-    public void LoadSnapshot_LeavesExistingStateIntact_WhenIncomingSnapshotIsCorrupt()
+    [Test]
+    public async Task LoadSnapshot_LeavesExistingStateIntact_WhenIncomingSnapshotIsCorrupt()
     {
         // A failed load is atomic. Populate the store, then feed it a truncated snapshot taken
         // from a different state. The incoming bytes are parsed into a throwaway store and only swapped
@@ -795,13 +798,13 @@ public class RaftStoreTests
         var corrupt = Serialize(incoming)[..^5]; // drop the tail mid-structure so the load fails partway
 
         using (var reader = new BinaryReader(new MemoryStream(corrupt), Encoding.UTF8))
-            Assert.ThrowsAny<Exception>(() => _store.LoadSnapshot(reader));
+            await Assert.That(() => _store.LoadSnapshot(reader)).Throws<Exception>();
 
-        Assert.Equal(baseline, Serialize(_store)); // the live store survived the failed load intact
+        await Assert.That(Serialize(_store)).IsEquivalentTo(baseline, CollectionOrdering.Matching); // the live store survived the failed load intact
     }
 
-    [Fact]
-    public void LoadSnapshot_Throws_OnOversizedCount()
+    [Test]
+    public async Task LoadSnapshot_Throws_OnOversizedCount()
     {
         using var ms = new MemoryStream();
         using (var w = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true))
@@ -813,11 +816,11 @@ public class RaftStoreTests
 
         using var reader = new BinaryReader(ms, Encoding.UTF8);
         // ReadCount must reject the hostile count before attempting a huge allocation.
-        Assert.Throws<InvalidDataException>(() => new RaftStore().LoadSnapshot(reader));
+        await Assert.That(() => new RaftStore().LoadSnapshot(reader)).ThrowsExactly<InvalidDataException>();
     }
 
-    [Fact]
-    public void Snapshot_RoundtripsMultiEntryHistory_DistinctFromCurrentState()
+    [Test]
+    public async Task Snapshot_RoundtripsMultiEntryHistory_DistinctFromCurrentState()
     {
         // History holds three entries while CurrentState is the middle one (an AddJobState appends to
         // history without changing the current state), so the snapshot must serialize the two
@@ -832,14 +835,14 @@ public class RaftStoreTests
             restored.LoadSnapshot(reader);
 
         var job = restored.GetJob("a")!;
-        Assert.Equal(["Enqueued", "Processing", "Custom"], job.History.Select(s => s.Name));
-        Assert.Equal("Processing", job.CurrentState!.Name);       // current is the middle entry, not the last
-        Assert.Equal(1, restored.GetStateCount("Processing"));    // index rebuilt from CurrentState
-        Assert.Equal(0, restored.GetStateCount("Custom"));        // history-only entry is not indexed
+        await Assert.That(job.History.Select(s => s.Name)).IsEquivalentTo(["Enqueued", "Processing", "Custom"], CollectionOrdering.Matching);
+        await Assert.That(job.CurrentState!.Name).IsEqualTo("Processing");       // current is the middle entry, not the last
+        await Assert.That(restored.GetStateCount("Processing")).IsEqualTo(1);    // index rebuilt from CurrentState
+        await Assert.That(restored.GetStateCount("Custom")).IsEqualTo(0);        // history-only entry is not indexed
     }
 
-    [Fact]
-    public void Apply_SameCommandSequence_YieldsByteIdenticalState_OnIndependentStores()
+    [Test]
+    public async Task Apply_SameCommandSequence_YieldsByteIdenticalState_OnIndependentStores()
     {
         // Determinism: applying the identical committed sequence to two independent stores must produce
         // byte-identical state. A wall-clock read, Guid.NewGuid, or any ambient input sneaking into the
@@ -872,11 +875,11 @@ public class RaftStoreTests
             b.Apply(cmd);
         }
 
-        Assert.Equal(Serialize(a), Serialize(b));
+        await Assert.That(Serialize(b)).IsEquivalentTo(Serialize(a), CollectionOrdering.Matching);
     }
 
-    [Fact]
-    public void TryAcquireLock_AfterLosingToAnotherOwner_RenewReturnsFalse()
+    [Test]
+    public async Task TryAcquireLock_AfterLosingToAnotherOwner_RenewReturnsFalse()
     {
         // The behavior RaftDistributedLock.RenewAsync relies on: once a lease has expired and another
         // owner took it, the original owner's renewal must be denied (it must not steal the lock back).
@@ -884,46 +887,46 @@ public class RaftStoreTests
         var owner2 = Guid.NewGuid();
         var lease = TimeSpan.FromMinutes(2);
 
-        Assert.True((bool)Apply(T0, new TryAcquireLockOp("r", owner1, lease))!);
-        Assert.True((bool)Apply(T0.AddMinutes(3), new TryAcquireLockOp("r", owner2, lease))!); // owner1 expired
-        Assert.False((bool)Apply(T0.AddMinutes(3), new TryAcquireLockOp("r", owner1, lease))!); // owner2 holds a live lease
+        await Assert.That((bool)Apply(T0, new TryAcquireLockOp("r", owner1, lease))!).IsTrue();
+        await Assert.That((bool)Apply(T0.AddMinutes(3), new TryAcquireLockOp("r", owner2, lease))!).IsTrue(); // owner1 expired
+        await Assert.That((bool)Apply(T0.AddMinutes(3), new TryAcquireLockOp("r", owner1, lease))!).IsFalse(); // owner2 holds a live lease
     }
 
-    [Fact]
-    public void TrimList_BoundaryCases()
+    [Test]
+    public async Task TrimList_BoundaryCases()
     {
         // Each list's newest-first view is 3,2,1.
         Apply(T0, new InsertToListOp("neg", "1"), new InsertToListOp("neg", "2"), new InsertToListOp("neg", "3"));
         Apply(T0, new TrimListOp("neg", -2, 1)); // negative start clamps to 0 -> keep indices 0..1
-        Assert.Equal(["3", "2"], _store.GetAllItemsFromList("neg"));
+        await Assert.That(_store.GetAllItemsFromList("neg")).IsEquivalentTo(["3", "2"], CollectionOrdering.Matching);
 
         Apply(T0, new InsertToListOp("over", "1"), new InsertToListOp("over", "2"), new InsertToListOp("over", "3"));
         Apply(T0, new TrimListOp("over", 1, 99)); // upper bound past the end -> keep 2,1
-        Assert.Equal(["2", "1"], _store.GetAllItemsFromList("over"));
+        await Assert.That(_store.GetAllItemsFromList("over")).IsEquivalentTo(["2", "1"], CollectionOrdering.Matching);
 
         Apply(T0, new InsertToListOp("one", "1"), new InsertToListOp("one", "2"), new InsertToListOp("one", "3"));
         Apply(T0, new TrimListOp("one", 2, 2)); // keep exactly index 2
-        Assert.Equal(["1"], _store.GetAllItemsFromList("one"));
+        await Assert.That(_store.GetAllItemsFromList("one")).IsEquivalentTo(["1"], CollectionOrdering.Matching);
     }
 
-    [Fact]
-    public void GetSetCount_WithLimit_NeverExceedsLimit_AndHandlesEdges()
+    [Test]
+    public async Task GetSetCount_WithLimit_NeverExceedsLimit_AndHandlesEdges()
     {
         Apply(T0, new AddRangeToSetOp("s1", ["a", "b", "c"]), new AddRangeToSetOp("s2", ["d", "e"])); // 5 total
 
-        Assert.Equal(0, _store.GetSetCount([], 100));            // no keys
-        Assert.Equal(0, _store.GetSetCount(["s1", "s2"], 0));    // limit 0
-        Assert.Equal(4, _store.GetSetCount(["s1", "s2"], 4));    // capped below the actual 5
-        Assert.Equal(5, _store.GetSetCount(["s1", "s2"], 100));  // actual, under the limit
-        Assert.True(_store.GetSetCount(["s1", "s2"], 4) <= 4);   // never exceeds the limit
+        await Assert.That(_store.GetSetCount([], 100)).IsEqualTo(0);            // no keys
+        await Assert.That(_store.GetSetCount(["s1", "s2"], 0)).IsEqualTo(0);    // limit 0
+        await Assert.That(_store.GetSetCount(["s1", "s2"], 4)).IsEqualTo(4);    // capped below the actual 5
+        await Assert.That(_store.GetSetCount(["s1", "s2"], 100)).IsEqualTo(5);  // actual, under the limit
+        await Assert.That(_store.GetSetCount(["s1", "s2"], 4) <= 4).IsTrue();   // never exceeds the limit
     }
 
-    [Fact]
-    public void GetRangeFromSet_EmptyWhenFromExceedsTo_OrKeyMissing()
+    [Test]
+    public async Task GetRangeFromSet_EmptyWhenFromExceedsTo_OrKeyMissing()
     {
         Apply(T0, new AddToSetOp("s", "a", 1), new AddToSetOp("s", "b", 2));
-        Assert.Empty(_store.GetRangeFromSet("s", 5, 1));        // from > to
-        Assert.Empty(_store.GetRangeFromSet("missing", 0, 10)); // unknown key
+        await Assert.That(_store.GetRangeFromSet("s", 5, 1)).IsEmpty();        // from > to
+        await Assert.That(_store.GetRangeFromSet("missing", 0, 10)).IsEmpty(); // unknown key
     }
 
     private static byte[] Serialize(RaftStore store)

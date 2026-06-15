@@ -1,7 +1,6 @@
 using Hangfire.Common;
 using Hangfire.Raft.Commands;
 using Hangfire.States;
-using Hangfire.Storage;
 
 namespace Hangfire.Raft.Tests;
 
@@ -14,82 +13,92 @@ public class RaftWriteOnlyTransactionTests
     // storage is referenced only by Commit, which these tests never call.
     private readonly RaftWriteOnlyTransaction _tx = new(storage: null!);
 
-    [Fact]
-    public void DecrementCounter_EmitsIncrementByMinusOne()
+    [Test]
+    public async Task DecrementCounter_EmitsIncrementByMinusOne()
     {
         _tx.DecrementCounter("c");
-        var op = Assert.IsType<IncrementCounterOp>(Assert.Single(_tx.PendingOps));
-        Assert.Equal("c", op.Key);
-        Assert.Equal(-1, op.Delta);
-        Assert.Null(op.ExpireAt);
+        var single = await Assert.That(_tx.PendingOps).HasSingleItem();
+        await Assert.That(single).IsTypeOf<IncrementCounterOp>();
+        var op = (IncrementCounterOp)single;
+        await Assert.That(op.Key).IsEqualTo("c");
+        await Assert.That(op.Delta).IsEqualTo(-1);
+        await Assert.That(op.ExpireAt).IsNull();
     }
 
-    [Fact]
-    public void IncrementCounter_WithExpiry_SetsExpireAt()
+    [Test]
+    public async Task IncrementCounter_WithExpiry_SetsExpireAt()
     {
         _tx.IncrementCounter("c", TimeSpan.FromHours(1));
-        var op = Assert.IsType<IncrementCounterOp>(Assert.Single(_tx.PendingOps));
-        Assert.Equal(1, op.Delta);
-        Assert.NotNull(op.ExpireAt);
+        var single = await Assert.That(_tx.PendingOps).HasSingleItem();
+        await Assert.That(single).IsTypeOf<IncrementCounterOp>();
+        var op = (IncrementCounterOp)single;
+        await Assert.That(op.Delta).IsEqualTo(1);
+        await Assert.That(op.ExpireAt).IsNotNull();
     }
 
-    [Fact]
-    public void AddToSet_WithoutScore_DefaultsToZero()
+    [Test]
+    public async Task AddToSet_WithoutScore_DefaultsToZero()
     {
         _tx.AddToSet("s", "v");
-        var op = Assert.IsType<AddToSetOp>(Assert.Single(_tx.PendingOps));
-        Assert.Equal(0.0d, op.Score);
+        var single = await Assert.That(_tx.PendingOps).HasSingleItem();
+        await Assert.That(single).IsTypeOf<AddToSetOp>();
+        var op = (AddToSetOp)single;
+        await Assert.That(op.Score).IsEqualTo(0.0d);
     }
 
-    [Fact]
-    public void SetJobState_MapsNameReasonAndData()
+    [Test]
+    public async Task SetJobState_MapsNameReasonAndData()
     {
         _tx.SetJobState("j", new ScheduledState(TimeSpan.FromHours(2)));
-        var op = Assert.IsType<SetJobStateOp>(Assert.Single(_tx.PendingOps));
-        Assert.Equal("j", op.JobId);
-        Assert.Equal(ScheduledState.StateName, op.State.Name);
-        Assert.Contains(op.State.Data, p => p.Key == "EnqueueAt"); // ScheduledState serializes EnqueueAt
+        var single = await Assert.That(_tx.PendingOps).HasSingleItem();
+        await Assert.That(single).IsTypeOf<SetJobStateOp>();
+        var op = (SetJobStateOp)single;
+        await Assert.That(op.JobId).IsEqualTo("j");
+        await Assert.That(op.State.Name).IsEqualTo(ScheduledState.StateName);
+        await Assert.That(op.State.Data).Contains(p => p.Key == "EnqueueAt"); // ScheduledState serializes EnqueueAt
     }
 
-    [Fact]
-    public void CreateJob_ProducesAnIdAndACreateOp()
+    [Test]
+    public async Task CreateJob_ProducesAnIdAndACreateOp()
     {
         var id = _tx.CreateJob(Job.FromExpression(() => TestJobs.Run("x")), new Dictionary<string, string> { ["k"] = "v" }, DateTime.UtcNow, TimeSpan.FromDays(1));
-        Assert.False(string.IsNullOrEmpty(id));
-        var op = Assert.IsType<CreateJobOp>(Assert.Single(_tx.PendingOps));
-        Assert.Equal(id, op.JobId);
-        Assert.Contains(op.Parameters, p => p.Key == "k" && p.Value == "v");
+        await Assert.That(string.IsNullOrEmpty(id)).IsFalse();
+        var single = await Assert.That(_tx.PendingOps).HasSingleItem();
+        await Assert.That(single).IsTypeOf<CreateJobOp>();
+        var op = (CreateJobOp)single;
+        await Assert.That(op.JobId).IsEqualTo(id);
+        await Assert.That(op.Parameters).Contains(p => p.Key == "k" && p.Value == "v");
     }
 
-    [Fact]
-    public void AllOpsAreBatched_InOrder()
+    [Test]
+    public async Task AllOpsAreBatched_InOrder()
     {
         _tx.IncrementCounter("c");
         _tx.AddToQueue("q", "j");
         _tx.ExpireJob("j", TimeSpan.FromMinutes(5));
 
-        Assert.Collection(_tx.PendingOps,
-            o => Assert.IsType<IncrementCounterOp>(o),
-            o => Assert.IsType<EnqueueOp>(o),
-            o => Assert.IsType<ExpireJobOp>(o));
+        await Assert.That(_tx.PendingOps.Count).IsEqualTo(3);
+        await Assert.That(_tx.PendingOps[0]).IsTypeOf<IncrementCounterOp>();
+        await Assert.That(_tx.PendingOps[1]).IsTypeOf<EnqueueOp>();
+        await Assert.That(_tx.PendingOps[2]).IsTypeOf<ExpireJobOp>();
     }
 
-    [Theory]
-    [InlineData("")]
-    [InlineData(null)]
-    public void Builders_RejectNullOrEmptyKeys(string? bad)
+    [Test]
+    [Arguments("")]
+    [Arguments((string?)null)]
+    public async Task Builders_RejectNullOrEmptyKeys(string? bad)
     {
         // The key/id guards are uniform across the builders, so spot-check a representative set
-        // (counter key, set key, queue name, job id) for both empty and null. ThrowsAny accepts the
-        // ArgumentNullException thrown for null as well as the ArgumentException thrown for empty.
-        Assert.ThrowsAny<ArgumentException>(() => _tx.IncrementCounter(bad!));
-        Assert.ThrowsAny<ArgumentException>(() => _tx.AddToSet(bad!, "v"));
-        Assert.ThrowsAny<ArgumentException>(() => _tx.AddToQueue(bad!, "j"));
-        Assert.ThrowsAny<ArgumentException>(() => _tx.SetJobParameter(bad!, "n", "v"));
+        // (counter key, set key, queue name, job id) for both empty and null. Throws<ArgumentException>
+        // accepts the ArgumentNullException thrown for null as well as the ArgumentException thrown for empty.
+        await Assert.That(() => _tx.IncrementCounter(bad!)).Throws<ArgumentException>();
+        await Assert.That(() => _tx.AddToSet(bad!, "v")).Throws<ArgumentException>();
+        await Assert.That(() => _tx.AddToQueue(bad!, "j")).Throws<ArgumentException>();
+        await Assert.That(() => _tx.SetJobParameter(bad!, "n", "v")).Throws<ArgumentException>();
     }
 
-    [Fact]
-    public void EveryBuilder_ProducesTheExpectedOpInOrder()
+    [Test]
+    public async Task EveryBuilder_ProducesTheExpectedOpInOrder()
     {
         _tx.SetJobParameter("j", "n", "v");
         _tx.AddJobState("j", new ScheduledState(TimeSpan.Zero));
@@ -112,26 +121,26 @@ public class RaftWriteOnlyTransactionTests
         _tx.ExpireHash("h", TimeSpan.FromMinutes(1));
         _tx.PersistHash("h");
 
-        Assert.Collection(_tx.PendingOps,
-            o => Assert.IsType<SetJobParameterOp>(o),
-            o => Assert.IsType<AddJobStateOp>(o),
-            o => Assert.IsType<ExpireJobOp>(o),
-            o => Assert.IsType<PersistJobOp>(o),
-            o => Assert.IsType<IncrementCounterOp>(o), // DecrementCounter maps to IncrementCounterOp(-1)
-            o => Assert.IsType<AddToSetOp>(o),
-            o => Assert.IsType<AddRangeToSetOp>(o),
-            o => Assert.IsType<RemoveFromSetOp>(o),
-            o => Assert.IsType<RemoveSetOp>(o),
-            o => Assert.IsType<ExpireSetOp>(o),
-            o => Assert.IsType<PersistSetOp>(o),
-            o => Assert.IsType<InsertToListOp>(o),
-            o => Assert.IsType<RemoveFromListOp>(o),
-            o => Assert.IsType<TrimListOp>(o),
-            o => Assert.IsType<ExpireListOp>(o),
-            o => Assert.IsType<PersistListOp>(o),
-            o => Assert.IsType<SetRangeInHashOp>(o),
-            o => Assert.IsType<RemoveHashOp>(o),
-            o => Assert.IsType<ExpireHashOp>(o),
-            o => Assert.IsType<PersistHashOp>(o));
+        await Assert.That(_tx.PendingOps.Count).IsEqualTo(20);
+        await Assert.That(_tx.PendingOps[0]).IsTypeOf<SetJobParameterOp>();
+        await Assert.That(_tx.PendingOps[1]).IsTypeOf<AddJobStateOp>();
+        await Assert.That(_tx.PendingOps[2]).IsTypeOf<ExpireJobOp>();
+        await Assert.That(_tx.PendingOps[3]).IsTypeOf<PersistJobOp>();
+        await Assert.That(_tx.PendingOps[4]).IsTypeOf<IncrementCounterOp>(); // DecrementCounter maps to IncrementCounterOp(-1)
+        await Assert.That(_tx.PendingOps[5]).IsTypeOf<AddToSetOp>();
+        await Assert.That(_tx.PendingOps[6]).IsTypeOf<AddRangeToSetOp>();
+        await Assert.That(_tx.PendingOps[7]).IsTypeOf<RemoveFromSetOp>();
+        await Assert.That(_tx.PendingOps[8]).IsTypeOf<RemoveSetOp>();
+        await Assert.That(_tx.PendingOps[9]).IsTypeOf<ExpireSetOp>();
+        await Assert.That(_tx.PendingOps[10]).IsTypeOf<PersistSetOp>();
+        await Assert.That(_tx.PendingOps[11]).IsTypeOf<InsertToListOp>();
+        await Assert.That(_tx.PendingOps[12]).IsTypeOf<RemoveFromListOp>();
+        await Assert.That(_tx.PendingOps[13]).IsTypeOf<TrimListOp>();
+        await Assert.That(_tx.PendingOps[14]).IsTypeOf<ExpireListOp>();
+        await Assert.That(_tx.PendingOps[15]).IsTypeOf<PersistListOp>();
+        await Assert.That(_tx.PendingOps[16]).IsTypeOf<SetRangeInHashOp>();
+        await Assert.That(_tx.PendingOps[17]).IsTypeOf<RemoveHashOp>();
+        await Assert.That(_tx.PendingOps[18]).IsTypeOf<ExpireHashOp>();
+        await Assert.That(_tx.PendingOps[19]).IsTypeOf<PersistHashOp>();
     }
 }
