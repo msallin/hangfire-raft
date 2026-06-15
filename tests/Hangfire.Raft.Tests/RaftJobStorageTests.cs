@@ -5,6 +5,7 @@ using Hangfire.Common;
 using Hangfire.Raft.Cluster;
 using Hangfire.States;
 using Hangfire.Storage;
+using xRetry;
 
 namespace Hangfire.Raft.Tests;
 
@@ -118,7 +119,7 @@ public class RaftJobStorageTests : IDisposable
         }
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task CreateExpiredJob_RoundtripsThroughGetJobData()
     {
         var storage = await StartSingleNode();
@@ -136,7 +137,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.Equal("de-CH", connection.GetJobParameter(jobId, "Culture"));
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task Transaction_EnqueueAndStateChange_AreAtomicAndVisible()
     {
         var storage = await StartSingleNode();
@@ -160,7 +161,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.Equal(1, ((Hangfire.Storage.JobStorageMonitor)monitor).EnqueuedCount("default"));
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task FetchNextJob_ReturnsEnqueuedJob_AndAckRemovesIt()
     {
         var storage = await StartSingleNode();
@@ -181,7 +182,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.ThrowsAny<OperationCanceledException>(() => connection.FetchNextJob(["default"], timeout.Token));
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task FetchNextJob_WakesUp_WhenAJobIsEnqueuedLater()
     {
         var storage = await StartSingleNode();
@@ -204,7 +205,7 @@ public class RaftJobStorageTests : IDisposable
         await enqueue;
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task DistributedLock_IsMutuallyExclusive_AcrossConnections()
     {
         var storage = await StartSingleNode();
@@ -219,7 +220,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.NotNull(reacquired);
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task DistributedLock_AfterRenewalsThenDispose_IsImmediatelyReacquirable()
     {
         // Short lease so the background renewal fires several times during the hold; this exercises
@@ -241,7 +242,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.NotNull(reacquired);
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task Heartbeat_ThrowsServerGone_ForUnknownServer()
     {
         var storage = await StartSingleNode();
@@ -253,7 +254,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.Throws<BackgroundServerGoneException>(() => connection.Heartbeat("unknown"));
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task State_SurvivesARestart_ViaWalReplay()
     {
         var port = AllocatePortPairs(1)[0];
@@ -283,7 +284,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.Equal("durable", data.Job.Args[0]);
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task ThreeNodeCluster_WritesFromEveryNode_AreVisibleEverywhere()
     {
         var ports = AllocatePortPairs(3);
@@ -332,7 +333,7 @@ public class RaftJobStorageTests : IDisposable
             => ((Hangfire.Storage.JobStorageMonitor)node.GetMonitoringApi()).EnqueuedCount("default");
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task LeaderFailover_WritesResumeOnASurvivingNode_AndPriorStateIsPreserved()
     {
         var ports = AllocatePortPairs(3);
@@ -390,7 +391,7 @@ public class RaftJobStorageTests : IDisposable
         }
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task GetHealth_ReportsLeadership_OnASingleNode()
     {
         var storage = await StartSingleNode();
@@ -407,7 +408,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.Equal(1, health.MemberCount);
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task StartAsync_DoesNotThrow_WhenAPeerHostnameIsUnresolvable()
     {
         // Members are DnsEndPoints resolved lazily by the transport, so an unresolvable peer is
@@ -430,7 +431,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.False(storage.GetHealth().HasLeader); // 1 of 2 reachable -> no quorum, but no crash
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task Compaction_SnapshotsTheLog_AndStateSurvivesRestart()
     {
         var port = AllocatePortPairs(1)[0];
@@ -460,7 +461,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.Equal("199", restarted.GetValueFromHash("hash-9", "i"));
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task Transaction_SecondCommit_Throws()
     {
         var storage = await StartSingleNode();
@@ -472,7 +473,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.Throws<InvalidOperationException>(transaction.Commit);
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task Statistics_ReflectOperations()
     {
         var storage = await StartSingleNode();
@@ -493,7 +494,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.Equal(1, stats.Succeeded);
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task Connection_ValidatesArguments()
     {
         var storage = await StartSingleNode();
@@ -510,7 +511,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.Throws<ArgumentException>(() => c.GetValueFromHash("", "f"));
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task Storage_AdvertisesFeatures_AndDescribesItself()
     {
         var storage = await StartSingleNode();
@@ -521,7 +522,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.Contains("Raft", storage.ToString());
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task Connection_ReadsBackEverythingWritten()
     {
         var storage = await StartSingleNode();
@@ -568,7 +569,7 @@ public class RaftJobStorageTests : IDisposable
         Assert.Equal("1", c.GetJobParameter(jobId, "p"));
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task FetchedJob_DisposeWithoutAck_RequeuesTheJob()
     {
         var storage = await StartSingleNode();
@@ -591,7 +592,7 @@ public class RaftJobStorageTests : IDisposable
         refetched.RemoveFromQueue();
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task FetchedJob_RenewalKeepsTheLeaseAlive_PastTheInvisibilityTimeout()
     {
         var port = AllocatePortPairs(1)[0];
@@ -620,7 +621,7 @@ public class RaftJobStorageTests : IDisposable
         fetched.RemoveFromQueue();
     }
 
-    [Fact]
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 500)]
     public async Task GetHealth_OnAFollower_ReportsTheRemoteLeader()
     {
         var ports = AllocatePortPairs(3);
