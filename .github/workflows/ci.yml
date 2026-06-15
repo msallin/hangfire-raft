@@ -25,6 +25,11 @@ jobs:
         run: dotnet build Hangfire.Raft.slnx -c Release --no-restore
 
       - name: Test
+        # Run the write-ahead logs on tmpfs so the fsync-on-every-commit clusters do not contend on the
+        # runner's disk, which otherwise pushes co-located cluster tests past their election/submit
+        # deadlines. This changes only where the WAL bytes live, not any test behaviour.
+        env:
+          HANGFIRE_RAFT_TEST_WAL_ROOT: /dev/shm
         run: >
           dotnet test Hangfire.Raft.slnx -c Release --no-build
           --logger "trx;LogFileName=test-results.trx"

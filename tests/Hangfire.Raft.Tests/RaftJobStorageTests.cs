@@ -21,7 +21,15 @@ public static class TestJobs
 /// </summary>
 public class RaftJobStorageTests : IDisposable
 {
-    private readonly string _walRoot = Path.Combine(Path.GetTempPath(), "hangfire-raft-tests", Guid.NewGuid().ToString("n"));
+    // The write-ahead log fsyncs on every commit (FlushInterval.Zero, for single-node durability). On a
+    // slow shared CI disk that contention can push co-located cluster tests past their election/submit
+    // deadlines, so CI points this at a tmpfs (HANGFIRE_RAFT_TEST_WAL_ROOT=/dev/shm) where fsync is
+    // near-free. Locally it falls back to the temp directory. This changes only where the bytes live, not
+    // any test semantics: a dispose+reopen restart still resumes from the same path.
+    private readonly string _walRoot = Path.Combine(
+        Environment.GetEnvironmentVariable("HANGFIRE_RAFT_TEST_WAL_ROOT") is { Length: > 0 } root ? root : Path.GetTempPath(),
+        "hangfire-raft-tests",
+        Guid.NewGuid().ToString("n"));
     private readonly List<RaftJobStorage> _storages = [];
 
     public void Dispose()
