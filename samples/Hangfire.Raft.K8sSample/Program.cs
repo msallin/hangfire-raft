@@ -135,7 +135,7 @@ static RaftStorageOptions BuildRaftOptions()
     // Members share this pod's StatefulSet name (the part of POD_NAME before the ordinal), so Self is
     // always one of them even if RAFT_SERVICE differs from the StatefulSet name.
     var ordinalDash = pod.LastIndexOf('-');
-    if (ordinalDash <= 0)
+    if (ordinalDash <= 0 || !int.TryParse(pod[(ordinalDash + 1)..], out _))
         throw new InvalidOperationException($"POD_NAME '{pod}' is not a StatefulSet pod name; expected the form name-ordinal (e.g. hangfire-0).");
     var statefulSet = pod[..ordinalDash];
 

@@ -75,10 +75,23 @@ internal sealed class HangfireStateMachine : SimpleStateMachine
 
             if (command is not null)
             {
-                var effects = Store.Apply(command);
-                Waiters.Complete(command.Id, effects.Result);
-                if (effects.SignaledQueues is { } queues) Signals.PulseQueues(queues);
-                if (effects.LocksReleased) Signals.PulseLocks();
+                try
+                {
+                    var effects = Store.Apply(command);
+                    Waiters.Complete(command.Id, effects.Result);
+                    if (effects.SignaledQueues is { } queues) Signals.PulseQueues(queues);
+                    if (effects.LocksReleased) Signals.PulseLocks();
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Applying a committed entry must not throw (Store.Apply is deterministic in-memory
+                    // mutation). If it does, this replica is now behind the committed log just like the
+                    // decode failure above, so fault the node instead of letting the exception escape while
+                    // the health probe still reports healthy.
+                    _logger.LogError(ex, "Failed to apply the committed log entry at index {Index}.", entry.Index);
+                    _faulted = true;
+                    throw new RaftStorageException($"Failed to apply the committed Raft log entry at index {entry.Index}.", ex);
+                }
             }
         }
 
@@ -112,6 +125,10 @@ internal sealed class HangfireStateMachine : SimpleStateMachine
             var snapshot = await File.ReadAllBytesAsync(snapshotFile.FullName, token).ConfigureAwait(false);
             using var reader = new BinaryReader(new MemoryStream(snapshot, writable: false), Encoding.UTF8);
             Store.LoadSnapshot(reader);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            throw; // a cancelled restore (shutdown or aborted startup) is not on-disk corruption
         }
         catch (Exception ex)
         {
