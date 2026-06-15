@@ -111,12 +111,21 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             ConfigurationStorage = null, // null selects the built-in in-memory storage for our static membership
         };
 
-        // Setting ConfigurationStorage to null above selects the built-in in-memory storage, so it is
-        // non-null here.
-        var storage = (InMemoryClusterConfigurationStorage<EndPoint>)_configuration.ConfigurationStorage!;
-        var members = storage.CreateInitialConfigurationBuilder();
-        foreach (var member in clusterMembers) members.Add(member);
-        members.Build();
+        // Seed the in-memory configuration with the full membership EXCEPT on a single-node cold start.
+        // RaftCluster.StartAsync only runs the lone-member self-bootstrap (add self to the configuration in
+        // committed state at genesis) when the loaded configuration is empty: its guard is
+        // `if (coldStart && config.Members.Count is 0)`. Pre-seeding the config makes Members.Count != 0,
+        // silently skips that bootstrap, and leaves the single node relying on a plain election that races
+        // the first WAL commit (the intermittent "no leader" write timeout). Multi-node clusters and
+        // restarts use the seeded configuration with ColdStart=false. (ConfigurationStorage was set to null
+        // above, which selects the built-in in-memory storage, so the cast is non-null here.)
+        if (!coldStart)
+        {
+            var storage = (InMemoryClusterConfigurationStorage<EndPoint>)_configuration.ConfigurationStorage!;
+            var members = storage.CreateInitialConfigurationBuilder();
+            foreach (var member in clusterMembers) members.Add(member);
+            members.Build();
+        }
 
         _forwardingServer = new ForwardingServer(
             new IPEndPoint(bindAddress, raftPort + options.RpcPortOffset),
@@ -129,29 +138,21 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         var cluster = new RaftStorageCluster(options);
         try
         {
-            // Restore the state machine's snapshot first, then build the WAL over it; on start the
-            // cluster replays the committed entries after the snapshot into the state machine.
+            // Restore the latest snapshot into the state machine before building the WAL over it. The
+            // SimpleStateMachine snapshot must be restored explicitly, and the committed log replayed
+            // (below) before we serve, or a restart loses entries committed after the last snapshot.
+            // RaftCluster.StartAsync also calls AuditTrail.InitializeAsync, but that alone is not
+            // sufficient here (verified: dropping these calls fails the WAL-replay tests in isolation).
             await cluster._stateMachine.RestoreAsync(token).ConfigureAwait(false);
-
-            // Does this node have a pre-existing log to replay (a restart), or is it a fresh/cold start?
-            // Checked before the WAL is built, since building it creates log files.
             var hasExistingLog = Directory.EnumerateFileSystemEntries(cluster._logPath).Any();
 
-            // FlushInterval.Zero durably flushes (checkpoints) the log on every commit. A Raft entry is
-            // only committed once it is on stable storage, so this is what lets a write actually complete
-            // and survive a restart: a single node is its own majority and must flush locally, and the
-            // committed entry must be on disk for the InitializeAsync replay to recover it. The default
-            // interval defers the flush and stalls those commits until the SubmitTimeout fires.
+            // FlushInterval.Zero checkpoints the log on every commit (durable-on-commit): a single node is
+            // its own majority and must flush locally for a write to complete and survive a restart.
             cluster._wal = new WriteAheadLog(
                 new WriteAheadLog.Options { Location = cluster._logPath, FlushInterval = TimeSpan.Zero },
                 cluster._stateMachine);
 
-            // Replay committed-but-unsnapshotted entries, but ONLY on a restart (existing log). On a fresh
-            // node there is nothing to replay, and running InitializeAsync before the cluster applies its
-            // cold-start configuration intermittently leaves a lone member unable to elect itself, so the
-            // first write times out (replicated=false, "no leader"). RaftCluster.StartAsync only
-            // auto-initializes the audit trail on the ASP.NET DI (UsePersistenceEngine) path, so a restart
-            // with a hand-assigned AuditTrail needs this call (removing it breaks the WAL-replay tests).
+            // Replay committed-but-unsnapshotted entries on a restart (a fresh node has nothing to replay).
             if (hasExistingLog)
                 await cluster._wal.InitializeAsync(token).ConfigureAwait(false);
 
