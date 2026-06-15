@@ -1,5 +1,13 @@
 <Project>
 
+  <!-- Restore writes a packages.lock.json next to every project so the full transitive graph (including
+       the floating Hangfire 1.8.* references) is pinned. CI restores in locked mode, which fails if a
+       lock file is missing or out of date, making builds reproducible. Regenerate after changing a
+       PackageReference by running a plain `dotnet restore`, then commit the updated lock files. -->
+  <PropertyGroup>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
   <!-- Newtonsoft.Json 11.0.1 arrives transitively via Hangfire.Core (and so into the samples and tests)
        and carries GHSA-5crp-9r3c-p9vr. The advisory is accepted repo-wide rather than pinned away;
        NuGet audit stays active for every other package and any new advisory still fails the build. -->

@@ -29,7 +29,11 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 10.0.x
+          # Install the exact SDK pinned in global.json; Dependabot's dotnet-sdk updater keeps it current.
+          global-json-file: global.json
+          # Cache the restored NuGet packages, keyed on the committed lock files.
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
 
       - name: Resolve version
         id: version
@@ -54,7 +58,9 @@ jobs:
           echo "Resolved package version: ${VERSION}"
 
       - name: Restore
-        run: dotnet restore Hangfire.Raft.slnx
+        # --locked-mode fails the build if any packages.lock.json is missing or out of date, so the
+        # restore is reproducible and a forgotten lock-file update cannot slip through.
+        run: dotnet restore Hangfire.Raft.slnx --locked-mode
 
       - name: Build
         run: dotnet build Hangfire.Raft.slnx -c Release --no-restore -p:Version=${{ steps.version.outputs.version }}
