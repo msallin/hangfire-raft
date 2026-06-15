@@ -21,6 +21,9 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     private readonly RaftStorageOptions _options;
     private readonly HangfireStateMachine _stateMachine;
     private readonly RaftCluster.TcpConfiguration _configuration;
+    private readonly IClusterConfigurationStorage<EndPoint> _configStorage;
+    private readonly IReadOnlyList<EndPoint> _clusterMembers;
+    private readonly bool _coldStart;
     private readonly string _logPath;
     private readonly ForwardingServer _forwardingServer;
     private readonly ForwardingClient _forwardingClient = new();
@@ -95,37 +98,29 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         // the public endpoint. DotNext derives member identity from the public endpoint's host, not
         // its resolved address, so identity is stable across IP changes, and it re-resolves the
         // DnsEndPoint on each (re)connection.
-        var clusterMembers = options.ClusterMembers.ToList();
-        // A sole member has no peers to coordinate an election with, so on its FIRST start it must
-        // cold-start: add itself to the configuration in committed state and elect itself. On a restart
-        // (existing WAL files present) it resumes instead, so cold-starting never re-initializes over and
-        // discards the persisted log. Multi-node clusters always coordinate the first election (false).
-        var coldStart = clusterMembers.Count == 1 && !Directory.EnumerateFileSystemEntries(_logPath).Any();
+        _clusterMembers = options.ClusterMembers;
+        var configFile = Path.Combine(options.WalPath, "config");
+
+        // A lone node on its FIRST start cold-starts: it adds itself to the configuration in committed
+        // state and elects itself immediately (term 0), which avoids a contended first election. "First
+        // start" is detected by the absence of the persisted config file; on a restart the file exists, so
+        // the node resumes (ColdStart=false) and loads its committed membership from disk. Multi-node
+        // clusters coordinate the first election (false) and are seeded in SeedConfigurationAsync.
+        _coldStart = _clusterMembers.Count == 1 && !File.Exists(configFile);
+
+        // Persist the cluster membership to disk so a restarted node resumes its committed membership
+        // instead of re-seeding it. DotNext's built-in configuration storage is in-memory and forgets it on
+        // restart; persisting is the pattern the maintainer recommends (DotNext discussion #207).
+        _configStorage = new EndPointPersistentConfigurationStorage(configFile, EqualityComparer<EndPoint>.Default);
         _configuration = new RaftCluster.TcpConfiguration(new IPEndPoint(bindAddress, raftPort))
         {
             LowerElectionTimeout = options.LowerElectionTimeoutMs,
             UpperElectionTimeout = options.UpperElectionTimeoutMs,
             PublicEndPoint = self,
-            ColdStart = coldStart,
+            ColdStart = _coldStart,
             LoggerFactory = options.LoggerFactory as ILoggerFactory ?? NullLoggerFactory.Instance,
-            ConfigurationStorage = null, // null selects the built-in in-memory storage for our static membership
+            ConfigurationStorage = _configStorage,
         };
-
-        // Seed the in-memory configuration with the full membership EXCEPT on a single-node cold start.
-        // RaftCluster.StartAsync only runs the lone-member self-bootstrap (add self to the configuration in
-        // committed state at genesis) when the loaded configuration is empty: its guard is
-        // `if (coldStart && config.Members.Count is 0)`. Pre-seeding the config makes Members.Count != 0,
-        // silently skips that bootstrap, and leaves the single node relying on a plain election that races
-        // the first WAL commit (the intermittent "no leader" write timeout). Multi-node clusters and
-        // restarts use the seeded configuration with ColdStart=false. (ConfigurationStorage was set to null
-        // above, which selects the built-in in-memory storage, so the cast is non-null here.)
-        if (!coldStart)
-        {
-            var storage = (InMemoryClusterConfigurationStorage<EndPoint>)_configuration.ConfigurationStorage!;
-            var members = storage.CreateInitialConfigurationBuilder();
-            foreach (var member in clusterMembers) members.Add(member);
-            members.Build();
-        }
 
         _forwardingServer = new ForwardingServer(
             new IPEndPoint(bindAddress, raftPort + options.RpcPortOffset),
@@ -157,6 +152,12 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                 await cluster._wal.InitializeAsync(token).ConfigureAwait(false);
 
             cluster._cluster = new RaftCluster(cluster._configuration) { AuditTrail = cluster._wal };
+
+            // Seed a multi-node cluster's committed membership on first start so it forms regardless of
+            // start order (a lone node cold-starts instead; a restart loads its membership from disk). Must
+            // run before StartAsync, which loads the configuration. See DotNext discussion #207.
+            await cluster.SeedConfigurationAsync(token).ConfigureAwait(false);
+
             cluster._forwardingServer.Start();
             await cluster._cluster.StartAsync(token).ConfigureAwait(false);
             cluster._maintenanceLoop = cluster.MaintenanceLoop();
@@ -167,6 +168,24 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             await cluster.DisposeAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Writes the static membership into the persistent configuration storage as the committed genesis
+    /// configuration, but only on first start: on a restart the storage already holds it (loaded from
+    /// disk) and is left untouched. Every node seeds the same member set, so a single node ends up as the
+    /// sole committed member (and elects itself) and a multi-node cluster shares one committed configuration.
+    /// </summary>
+    private async Task SeedConfigurationAsync(CancellationToken token)
+    {
+        // A cold-starting lone node adds and persists its sole member via the bootstrap, so skip it here.
+        if (_coldStart) return;
+
+        var config = await _configStorage.LoadConfigurationAsync(token).ConfigureAwait(false);
+        if (config.Members.Count is not 0) return; // a restart already has its membership on disk
+
+        foreach (var member in _clusterMembers) config = config.Add(member);
+        await _configStorage.SaveConfigurationAsync(config, configurationVersion: 0L, token).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -388,6 +407,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         // restart replay skip them.
         if (_wal is not null) await _wal.DisposeAsync().ConfigureAwait(false);
         await _stateMachine.DisposeAsync().ConfigureAwait(false);
+        _configStorage.Dispose();
         _fetchGate.Dispose();
         _lifetime.Dispose();
     }
