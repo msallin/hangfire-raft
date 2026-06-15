@@ -76,8 +76,17 @@ public class RaftWriteOnlyTransactionTests
 
     [Theory]
     [InlineData("")]
-    public void Builders_ValidateArguments(string bad)
-        => Assert.Throws<ArgumentException>(() => _tx.IncrementCounter(bad));
+    [InlineData(null)]
+    public void Builders_RejectNullOrEmptyKeys(string? bad)
+    {
+        // The key/id guards are uniform across the builders, so spot-check a representative set
+        // (counter key, set key, queue name, job id) for both empty and null. ThrowsAny accepts the
+        // ArgumentNullException thrown for null as well as the ArgumentException thrown for empty.
+        Assert.ThrowsAny<ArgumentException>(() => _tx.IncrementCounter(bad!));
+        Assert.ThrowsAny<ArgumentException>(() => _tx.AddToSet(bad!, "v"));
+        Assert.ThrowsAny<ArgumentException>(() => _tx.AddToQueue(bad!, "j"));
+        Assert.ThrowsAny<ArgumentException>(() => _tx.SetJobParameter(bad!, "n", "v"));
+    }
 
     [Fact]
     public void EveryBuilder_ProducesTheExpectedOpInOrder()

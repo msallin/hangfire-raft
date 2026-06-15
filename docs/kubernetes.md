@@ -142,10 +142,15 @@ resolves lazily and re-resolves on every reconnect.
   `replicas` and `RAFT_REPLICAS` (and `PodDisruptionBudget.minAvailable`) and roll the StatefulSet.
   Do not autoscale it.
 
-- **Readiness reflects write-availability.** The sample's `/ready` endpoint (backed by
-  `RaftJobStorage.GetHealth()`) returns 200 only when the node knows a leader — so it can submit or
-  forward writes — and 503 otherwise; the `readinessProbe` points at it. Liveness is a separate TCP
-  check on the Raft port, and `/health` stays a plain "host is up" signal.
+- **Health probes.** The sample exposes two endpoints, both backed by `RaftJobStorage.GetHealth()`.
+  `/ready` returns 200 only when the node knows a leader — so it can submit or forward writes — and 503
+  otherwise; the `readinessProbe` points at it, so a leaderless node is pulled from the Service.
+  `/health` returns 503 only when the state machine has **faulted** (a committed entry that will not
+  apply, or an unreadable snapshot); the `livenessProbe` points at it, so a faulted node is recycled
+  instead of lingering as a dead quorum member. A `startupProbe` on `/health` gates both until the node
+  finishes WAL replay / snapshot restore on start (it restores state before binding the HTTP listener),
+  so a slow-but-healthy restart is not killed mid-replay — widen its `failureThreshold` for a large log.
+  Recovery from a persistent fault is per node: clear that pod's WAL volume so it re-syncs from the leader.
 
 - **Clocks.** Expirations compare the submitting node's UTC timestamp, so keep node clocks reasonably
   synchronized (kubelet nodes normally run NTP).
@@ -153,3 +158,9 @@ resolves lazily and re-resolves on every reconnect.
 - **Dashboard auth.** The sample exposes the dashboard with an allow-all authorization filter so it is
   viewable through a Service; replace it with real authentication before exposing it to anyone
   untrusted.
+
+- **Network trust.** The Raft (5000) and forwarding (5001) ports are unauthenticated, so any pod that
+  can reach 5001 could forward arbitrary storage commands to the leader. The production manifest ships a
+  `NetworkPolicy` that restricts those ports to other Hangfire pods. It only takes effect on a CNI that
+  enforces NetworkPolicy (Calico, Cilium, …) — confirm yours does, or provide an equivalent boundary,
+  before treating the consensus ports as protected.

@@ -119,8 +119,8 @@ internal sealed partial class RaftStore
                 }
             case RequeueFetchedOp o:
                 {
-                    // Always drop the lease; re-enqueue only if the job still exists. Maintenance no
-                    // longer evicts a job while it is fetched, so this guard is defensive (and matches
+                    // Always drop the lease; re-enqueue only if the job still exists. Maintenance never
+                    // evicts a job while it is fetched, so this existence guard is defensive (it matches
                     // the stale-fetch reclaim in RunMaintenance).
                     if (_fetched.Remove(o.FetchToken, out var fetched) && _jobs.ContainsKey(fetched.JobId))
                     {

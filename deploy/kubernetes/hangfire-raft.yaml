@@ -51,6 +51,13 @@ spec:
   serviceName: hangfire
   replicas: 3                     # odd number for quorum; 3 tolerates one node down
   podManagementPolicy: Parallel   # all nodes start together so they can hold an election at boot
+  minReadySeconds: 35             # > CoreDNS record TTL (default 30s): on a rolling update, peers must
+                                  # re-resolve a rolled pod's new IP before the next pod is taken down,
+                                  # or a second pod going down inside one TTL transiently loses quorum
+  updateStrategy:
+    type: RollingUpdate           # one pod at a time, highest ordinal first; the PDB below holds quorum
+    rollingUpdate:
+      partition: 0
   selector:
     matchLabels:
       app: hangfire
@@ -61,6 +68,8 @@ spec:
     spec:
       securityContext:            # drop root: the pod and its WAL must not run/own as uid 0
         runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault    # required by the "restricted" Pod Security Standard
         # fsGroup makes the PVC-backed /data/wal group-owned by this gid so the non-root user
         # (runAsUser on the container) can write the write-ahead log. It must match runAsUser and the
         # Dockerfile USER, or the node fails to open the WAL.
@@ -72,7 +81,10 @@ spec:
               labelSelector:
                 matchLabels:
                   app: hangfire
-      terminationGracePeriodSeconds: 30
+      # Must exceed SubmitTimeout (default 30s) plus WAL-close time: on SIGTERM the app drains in-flight
+      # writes (up to one SubmitTimeout) and then closes the write-ahead log. A SIGKILL mid-close forces a
+      # longer replay (or a fault) on the next start, so leave headroom above a single SubmitTimeout.
+      terminationGracePeriodSeconds: 45
       containers:
         - name: app
           image: ghcr.io/msallin/hangfire-raft-sample:latest  # <-- replace with your image
@@ -101,18 +113,33 @@ spec:
           volumeMounts:
             - name: wal
               mountPath: /data/wal
+            - name: tmp
+              mountPath: /tmp             # writable scratch for the .NET diagnostics socket under a read-only root
+          # The startup probe gates liveness and readiness until WAL replay / snapshot restore finishes
+          # and the HTTP listener binds (the node restores its state before serving, so nothing answers
+          # on 8080 until then). failureThreshold x periodSeconds is the replay budget; widen it for a
+          # large log rather than inflating a liveness delay that would also slow fault detection.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 60          # ~5 min budget for WAL replay / snapshot restore on restart
           livenessProbe:
-            tcpSocket:
-              port: 5000          # the Raft listener is up once the node has started
-            initialDelaySeconds: 15
+            httpGet:
+              path: /health              # 503 only when the state machine has faulted -> recycle the pod
+              port: 8080
             periodSeconds: 20
+            failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /ready          # 200 only when the node can reach a leader (has quorum)
+              path: /ready               # 200 only when the node can reach a leader (has quorum)
               port: 8080
-            initialDelaySeconds: 10
             periodSeconds: 10
           resources:
+            # The state machine holds the whole dataset (plus an in-flight snapshot copy) in memory, so
+            # size the memory limit to your peak job volume; an OOMKill is a SIGKILL that risks the WAL.
+            # No CPU limit on purpose: CFS-throttling the election/heartbeat loop causes spurious failovers.
             requests:
               cpu: 100m
               memory: 256Mi
@@ -122,8 +149,12 @@ spec:
             runAsNonRoot: true
             runAsUser: 64198              # matches fsGroup above and the Dockerfile USER (keeps /data/wal writable)
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true  # the app writes only to the WAL PVC and the /tmp emptyDir above
             capabilities:
               drop: [ "ALL" ]
+      volumes:
+        - name: tmp               # ephemeral scratch so the container root can stay read-only
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: wal                 # one persistent volume per pod for the write-ahead log + snapshots
@@ -144,3 +175,30 @@ spec:
   selector:
     matchLabels:
       app: hangfire
+---
+# The Raft (5000) and forwarding (5001) channels are unauthenticated by design, so the deployment
+# assumes a trusted network boundary. This policy makes that boundary explicit: only Hangfire pods may
+# reach the consensus ports. Without it, any pod on the cluster can forward arbitrary storage commands
+# to the leader. Requires a CNI that enforces NetworkPolicy (Calico, Cilium, ...); on a CNI that ignores
+# it this is a documented no-op, so verify your CNI before relying on it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hangfire-raft
+  namespace: jobs
+spec:
+  podSelector:
+    matchLabels:
+      app: hangfire
+  policyTypes: [ Ingress ]        # egress left open so DNS resolution and peer dialing keep working
+  ingress:
+    - from:                       # consensus + forwarding: only from peer Hangfire pods
+        - podSelector:
+            matchLabels:
+              app: hangfire
+      ports:
+        - { port: 5000 }
+        - { port: 5001 }
+    - ports:                      # dashboard/health: open for an Ingress or `kubectl port-forward`.
+        - { port: 8080 }          # the dashboard ships demo-only auth — put real auth in front of it
+

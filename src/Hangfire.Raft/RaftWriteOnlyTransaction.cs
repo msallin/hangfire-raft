@@ -30,7 +30,7 @@ internal sealed class RaftWriteOnlyTransaction(RaftJobStorage storage) : JobStor
         if (_committed) throw new InvalidOperationException("The transaction was already committed.");
         _committed = true;
         if (_ops.Count == 0) return;
-        storage.Cluster.Submit(Command.Batch(_ops)); // Batch snapshots the list, so no defensive copy is needed here
+        storage.Cluster.Submit(Command.Batch(_ops));
     }
 
     // ----- jobs -----
@@ -43,7 +43,11 @@ internal sealed class RaftWriteOnlyTransaction(RaftJobStorage storage) : JobStor
         var jobId = Guid.NewGuid().ToString("n");
         var payload = InvocationData.SerializeJob(job).SerializePayload();
         var parameterList = parameters.Select(p => new KeyValuePair<string, string?>(p.Key, p.Value)).ToList();
-        _ops.Add(new CreateJobOp(jobId, payload, parameterList, createdAt, createdAt + expireIn));
+        // The store keeps every instant as UTC ticks, so normalize the caller's createdAt here (Hangfire
+        // core already passes UtcNow; this just makes a Local-kind value correct instead of off by the
+        // local offset). expireIn is a duration, so the expiry stays in UTC.
+        var createdAtUtc = createdAt.ToUniversalTime();
+        _ops.Add(new CreateJobOp(jobId, payload, parameterList, createdAtUtc, createdAtUtc + expireIn));
         return jobId;
     }
 
