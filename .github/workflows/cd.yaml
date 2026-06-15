@@ -20,6 +20,7 @@ jobs:
   pack-publish:
     name: Pack & Publish
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       id-token: write     # Required for NuGet Trusted Publishing; without it NuGet/login fails with 403.
       contents: write     # Required to create the GitHub Release; a job-level block drops inherited defaults.
