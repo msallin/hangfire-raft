@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write     # Required for NuGet Trusted Publishing; without it NuGet/login fails with 403.
-      contents: read      # A job-level permissions block drops the inherited defaults, so restate this.
+      contents: write     # Required to create the GitHub Release; a job-level block drops inherited defaults.
     steps:
       - uses: actions/checkout@v6
 
@@ -97,3 +97,29 @@ jobs:
           --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
           --source https://api.nuget.org/v3/index.json
           --skip-duplicate
+
+      # --- GitHub Release. ---
+      # Created only on tag pushes, after a successful NuGet publish, so the Release reflects what was
+      # actually shipped. Uses the gh CLI (preinstalled on the runner) rather than a third-party action.
+      # --generate-notes builds the notes from commits/PRs since the previous tag; --verify-tag guards
+      # against creating a release for a tag the runner cannot see. The .nupkg/.snupkg are attached so
+      # the package is downloadable straight from the Release page, not just the workflow run.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        # The tag is passed through an env var rather than interpolated into the script, matching the
+        # version step above.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # SemVer pre-release tags carry a hyphen (e.g. v1.2.3-rc.1); mark those as GitHub pre-releases.
+          prerelease=""
+          if [[ "${TAG}" == *-* ]]; then prerelease="--prerelease"; fi
+          gh release create "${TAG}" \
+            --title "${TAG}" \
+            --generate-notes \
+            --verify-tag \
+            ${prerelease} \
+            "${GITHUB_WORKSPACE}/artifacts/"*.nupkg \
+            "${GITHUB_WORKSPACE}/artifacts/"*.snupkg
