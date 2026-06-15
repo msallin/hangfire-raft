@@ -76,7 +76,10 @@ internal sealed class RaftFetchedJob : IFetchedJob
                 // (the lease is already gone). Only warn about a genuine reclaim of an in-flight job,
                 // not about one that already completed, to avoid a misleading "may run twice" log.
                 if (!_completed && !_disposed)
+                {
+                    RaftMetrics.FetchLeaseReclaims.Add(1);
                     _cluster.Logger.LogWarning("Fetch lease for job {JobId} expired and was reclaimed; the job may run a second time.", JobId);
+                }
             }
         }
         catch (Exception ex)

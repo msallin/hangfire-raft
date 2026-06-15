@@ -29,6 +29,20 @@ public sealed record RaftClusterHealth
     public required int MemberCount { get; init; }
 
     /// <summary>
+    /// Index of the last log entry this node has applied to its local in-memory state. Local reads
+    /// (job data, sets, the dashboard) reflect exactly this prefix of the log.
+    /// </summary>
+    public required long AppliedIndex { get; init; }
+
+    /// <summary>
+    /// Index of the last committed log entry known to this node. <c>CommitIndex - AppliedIndex</c> is the
+    /// local apply lag: how far this node's reads trail the committed log. A node that reports
+    /// <see cref="HasLeader"/> can still show a growing gap here (for example a partitioned follower), so
+    /// a readiness probe that cares about read freshness should bound this difference.
+    /// </summary>
+    public required long CommitIndex { get; init; }
+
+    /// <summary>
     /// True when the local state machine has faulted (a committed entry failed to apply, or a snapshot
     /// failed to restore). A faulted node cannot make safe progress, so a liveness probe should fail on
     /// this and let the orchestrator restart the node; readiness should also treat it as not ready.

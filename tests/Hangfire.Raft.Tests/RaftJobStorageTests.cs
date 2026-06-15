@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using DotNext.Net.Cluster.Consensus.Raft.Membership;
@@ -694,5 +695,150 @@ public class RaftJobStorageTests
             // The DNS member must round-trip as a DnsEndPoint, not collapse to a resolved IP address.
             await Assert.That(config.Members).Contains(m => m is DnsEndPoint { Host: "node1.local", Port: 6000 });
         }
+    }
+
+    [Test]
+    [RetryWithDelay(3, 500)]
+    public async Task AcknowledgedWrite_SurvivesACrash_WithoutAnyBackgroundFlush()
+    {
+        // With FlushInterval.Infinite the background flusher is off, so the ONLY thing that persists a
+        // write is the flush SubmitAsync performs before acknowledging it. Disposing the node performs no
+        // flush (and neither would a real crash), so finding every acknowledged job after a restart proves
+        // durability comes solely from that flush-before-ack: drop it and the checkpoint never advances, so
+        // the restart replays nothing and the jobs are gone.
+        var port = AllocatePortPairs(1)[0];
+        var walPath = Path.Combine(_walRoot, "crash-durability");
+
+        var jobIds = new List<string>();
+        var first = await StartNode(port, [port], walPath, configure: o => o.FlushInterval = Timeout.InfiniteTimeSpan);
+        using (var connection = (JobStorageConnection)first.GetConnection())
+        {
+            // Several writes, so the assertion is about the whole acknowledged tail, not a lucky single entry.
+            for (var i = 0; i < 5; i++)
+                jobIds.Add(connection.CreateExpiredJob(Job.FromExpression(() => TestJobs.Run("durable")), new Dictionary<string, string>(), DateTime.UtcNow, TimeSpan.FromDays(1)));
+        }
+
+        // Terminate without a graceful flush, mimicking a process crash.
+        await first.DisposeAsync();
+        _storages.Remove(first);
+
+        var second = await StartNode(port, [port], walPath, configure: o => o.FlushInterval = Timeout.InfiniteTimeSpan);
+        using var restarted = (JobStorageConnection)second.GetConnection();
+        // Infinite-flush makes the restart's tail replay synchronous (slower), and rebinding the same port
+        // can hit a brief re-election delay, so allow a wider budget than the default before the restarted
+        // node is caught up.
+        await PollUntil(() => jobIds.All(id => restarted.GetJobData(id) is not null), "every acknowledged write is durable after a crash", timeoutSeconds: 30);
+        foreach (var id in jobIds)
+            await Assert.That(restarted.GetJobData(id)).IsNotNull();
+    }
+
+    [Test]
+    [RetryWithDelay(3, 500)]
+    public async Task Minority_CannotCommitWrites_AfterQuorumIsLost()
+    {
+        var ports = AllocatePortPairs(3);
+        var nodes = (await Task.WhenAll(ports.Select(p => StartNode(p, ports, configure: o => o.SubmitTimeout = TimeSpan.FromSeconds(3))))).ToList();
+
+        // Baseline: a write commits while the full cluster has quorum, and replicates everywhere.
+        string baselineId;
+        using (var connection = (JobStorageConnection)nodes[0].GetConnection())
+            baselineId = connection.CreateExpiredJob(Job.FromExpression(() => TestJobs.Run("quorum")), new Dictionary<string, string>(), DateTime.UtcNow, TimeSpan.FromDays(1));
+        foreach (var node in nodes)
+        {
+            using var c = (JobStorageConnection)node.GetConnection();
+            await PollUntil(() => c.GetJobData(baselineId) is not null, "baseline write replicated");
+        }
+
+        // Drop two of three members. The lone survivor has no majority and must refuse to commit a write
+        // (a minority committing would be a split brain): the attempt fails instead of silently succeeding.
+        await nodes[1].DisposeAsync();
+        _storages.Remove(nodes[1]);
+        await nodes[2].DisposeAsync();
+        _storages.Remove(nodes[2]);
+
+        using var survivor = (JobStorageConnection)nodes[0].GetConnection();
+        await Assert.That(() => survivor.CreateExpiredJob(Job.FromExpression(() => TestJobs.Run("no-quorum")), new Dictionary<string, string>(), DateTime.UtcNow, TimeSpan.FromDays(1)))
+            .Throws<RaftStorageException>();
+
+        // Reads do not need quorum, so the prior committed state is still visible on the survivor.
+        await Assert.That(survivor.GetJobData(baselineId)).IsNotNull();
+    }
+
+    [Test]
+    [RetryWithDelay(3, 500)]
+    public async Task ConcurrentFetches_AcrossNodes_DeliverEachJobExactlyOnce()
+    {
+        var ports = AllocatePortPairs(3);
+        var nodes = (await Task.WhenAll(ports.Select(p => StartNode(p, ports)))).ToList();
+
+        // Enqueue a batch through one node and wait until every job is visible on every node. All jobs go
+        // in a single transaction (one consensus round) so the test exercises concurrent fetch contention,
+        // not a long sequence of co-located fsyncing writes.
+        const int jobCount = 20;
+        var enqueued = new List<string>();
+        using (var connection = (JobStorageConnection)nodes[0].GetConnection())
+        {
+            using var tx = (JobStorageTransaction)connection.CreateWriteTransaction();
+            for (var i = 0; i < jobCount; i++)
+            {
+                var jobId = tx.CreateJob(Job.FromExpression(() => TestJobs.Run("contended")), new Dictionary<string, string>(), DateTime.UtcNow, TimeSpan.FromDays(1));
+                tx.AddToQueue("default", jobId);
+                enqueued.Add(jobId);
+            }
+            tx.Commit();
+        }
+        foreach (var node in nodes)
+        {
+            using var c = (JobStorageConnection)node.GetConnection();
+            await PollUntil(() => enqueued.All(id => c.GetJobData(id) is not null), "all jobs replicated");
+        }
+
+        // Race four fetchers on each of the three nodes. FetchOp is a consensus operation, so every job
+        // must go to exactly one fetcher across the whole cluster: no duplicates, no losses.
+        var fetched = new ConcurrentBag<string>();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var workers = nodes.SelectMany(node => Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
+        {
+            using var connection = (JobStorageConnection)node.GetConnection();
+            while (fetched.Count < jobCount && !stop.IsCancellationRequested)
+            {
+                try
+                {
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
+                    timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                    using var job = connection.FetchNextJob(["default"], timeout.Token);
+                    fetched.Add(job.JobId);
+                    job.RemoveFromQueue();
+                }
+                catch (OperationCanceledException)
+                {
+                    // The queue is momentarily empty (every job already taken); re-check the loop condition.
+                }
+            }
+        }))).ToList();
+
+        await Task.WhenAll(workers);
+
+        // Exactly the enqueued set, each delivered once: no duplicate execution, no lost job.
+        await Assert.That(fetched.Count).IsEqualTo(jobCount);
+        await Assert.That(fetched.OrderBy(x => x)).IsEquivalentTo(enqueued.OrderBy(x => x), CollectionOrdering.Matching);
+    }
+
+    [Test]
+    [RetryWithDelay(3, 500)]
+    public async Task GetHealth_ExposesAppliedAndCommitIndex()
+    {
+        var storage = await StartSingleNode();
+        await PollUntil(() => storage.GetHealth().HasLeader, "the node elects itself leader");
+
+        using var connection = (JobStorageConnection)storage.GetConnection();
+        connection.CreateExpiredJob(Job.FromExpression(() => TestJobs.Run("x")), new Dictionary<string, string>(), DateTime.UtcNow, TimeSpan.FromDays(1));
+
+        var health = storage.GetHealth();
+        // A committed, applied and flushed write advances both indices past genesis, and applied can never
+        // run ahead of committed: CommitIndex - AppliedIndex is the local apply lag a probe can bound.
+        await Assert.That(health.CommitIndex > 0L).IsTrue();
+        await Assert.That(health.AppliedIndex > 0L).IsTrue();
+        await Assert.That(health.AppliedIndex <= health.CommitIndex).IsTrue();
     }
 }

@@ -17,6 +17,12 @@ internal sealed class RaftStorageConnection(RaftJobStorage storage) : JobStorage
 
     public override IWriteOnlyTransaction CreateWriteTransaction() => new RaftWriteOnlyTransaction(storage);
 
+    /// <remarks>
+    /// The returned lock is a replicated <em>lease, not a fence</em>: under node clock skew or a holder
+    /// pause longer than <see cref="RaftStorageOptions.LockLeaseTimeout"/> two owners can overlap, and
+    /// there is no fencing token. Use it for advisory mutual exclusion between idempotent jobs, not to
+    /// guard non-idempotent external side effects.
+    /// </remarks>
     public override IDisposable AcquireDistributedLock(string resource, TimeSpan timeout)
     {
         ArgumentException.ThrowIfNullOrEmpty(resource);

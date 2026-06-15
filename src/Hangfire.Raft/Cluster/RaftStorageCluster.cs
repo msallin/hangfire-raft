@@ -36,6 +36,13 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     // into N wasted consensus rounds (N = idle workers). With it, losers wait for the winner's
     // outcome and re-probe a possibly-empty queue instead.
     private readonly SemaphoreSlim _fetchGate = new(1, 1);
+
+    // Serializes the per-write durability flush. The WAL's FlushAsync (its EnsureFlushedAsync path under
+    // FlushInterval.Zero) waits on a single-consumer value-task source, so concurrent callers from many
+    // Hangfire worker threads would corrupt it. One flush persists the whole committed tail, so funnelling
+    // every writer through this gate is also cheap: a writer whose entry a prior flush already covered
+    // returns immediately.
+    private readonly SemaphoreSlim _flushGate = new(1, 1);
     private Task _maintenanceLoop = Task.CompletedTask;
 
     // Created in StartAsync after the state machine has restored its snapshot (the WAL must be built
@@ -63,8 +70,14 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     public RaftClusterHealth GetHealth()
     {
         var cluster = _cluster;
+        var wal = _wal;
+        // CommitIndex - AppliedIndex is how far local reads trail the committed log. A partitioned
+        // follower can still report HasLeader yet have a growing gap here while it serves stale reads,
+        // which a leadership-only health signal cannot expose.
+        var appliedIndex = wal?.LastAppliedIndex ?? 0L;
+        var commitIndex = wal?.LastCommittedEntryIndex ?? 0L;
         if (cluster is null)
-            return new RaftClusterHealth { HasLeader = false, IsLeader = false, LeaderEndpoint = null, Term = 0, MemberCount = 0, Faulted = _stateMachine.IsFaulted };
+            return new RaftClusterHealth { HasLeader = false, IsLeader = false, LeaderEndpoint = null, Term = 0, MemberCount = 0, Faulted = _stateMachine.IsFaulted, AppliedIndex = appliedIndex, CommitIndex = commitIndex };
 
         var leader = cluster.Leader;
         return new RaftClusterHealth
@@ -75,6 +88,8 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             Term = cluster.Term,
             MemberCount = cluster.Members.Count,
             Faulted = _stateMachine.IsFaulted,
+            AppliedIndex = appliedIndex,
+            CommitIndex = commitIndex,
         };
     }
 
@@ -147,10 +162,13 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             await cluster._stateMachine.RestoreAsync(token).ConfigureAwait(false);
             var hasExistingLog = Directory.EnumerateFileSystemEntries(cluster._logPath).Any();
 
-            // FlushInterval.Zero checkpoints the log on every commit (durable-on-commit): a single node is
-            // its own majority and must flush locally for a write to complete and survive a restart.
+            // FlushInterval.Zero runs a background flusher that persists on every commit. That alone is
+            // NOT a durability guarantee: the apply that completes a submitter's waiter races the flush,
+            // so SubmitAsync flushes the committed tail itself before acking (see DurablyFlushAsync). The
+            // background flusher still matters on a multi-node cluster, where it persists entries a node
+            // received as a follower (and therefore never flushed through its own SubmitAsync).
             cluster._wal = new WriteAheadLog(
-                new WriteAheadLog.Options { Location = cluster._logPath, FlushInterval = TimeSpan.Zero },
+                new WriteAheadLog.Options { Location = cluster._logPath, FlushInterval = options.FlushInterval },
                 cluster._stateMachine);
 
             // Replay the committed-but-unsnapshotted tail now so the node is fully caught up before it
@@ -293,7 +311,14 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                 }
             }
 
-            return await waiter.WaitAsync(linked).ConfigureAwait(false);
+            var result = await waiter.WaitAsync(linked).ConfigureAwait(false);
+
+            // Durability: the waiter completes the moment the entry is applied in memory, which in DotNext
+            // happens before the background flusher persists it. Flush the committed tail (advancing the
+            // on-disk checkpoint past this entry) before reporting success, so an acknowledged write
+            // survives a crash. On a single node this is the entire durability guarantee.
+            await DurablyFlushAsync(linked).ConfigureAwait(false);
+            return result;
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         {
@@ -301,7 +326,11 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
 
             // A timeout AFTER the command was handed to the cluster is ambiguous (it may already be
             // committed), so it is surfaced distinctly from a pre-handoff timeout (no leader / no quorum),
-            // which never reached the log and is always safe to retry.
+            // which never reached the log and is always safe to retry. Count the ambiguous outcomes that
+            // are actually surfaced here -- including a flush that timed out after a clean commit+apply --
+            // so the metric matches the retries Hangfire will issue, with no double count for transient
+            // ambiguity that the apply waiter went on to resolve successfully.
+            if (appended) RaftMetrics.AmbiguousWrites.Add(1);
             throw appended
                 ? new RaftStorageException($"The storage write for command {command.Id} did not apply within {_options.SubmitTimeout}; it was handed to the cluster and may already be committed (ambiguous outcome).")
                 : new RaftStorageException($"The storage write did not reach a leader within {_options.SubmitTimeout}. The cluster may have no leader or no quorum.");
@@ -322,6 +351,25 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
 
     public object? Submit(Command command, CancellationToken token = default)
         => SubmitAsync(command, token).GetAwaiter().GetResult();
+
+    /// <summary>
+    /// Flushes the write-ahead log up to its current committed index, so an entry that has just been
+    /// applied is durable on disk before the caller treats the write as done. Serialized through
+    /// <see cref="_flushGate"/> because the WAL's flush wait is single-consumer; one flush covers every
+    /// entry committed so far, so a caller whose entry an earlier flush already persisted returns at once.
+    /// </summary>
+    private async Task DurablyFlushAsync(CancellationToken token)
+    {
+        await _flushGate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            await _wal!.FlushAsync(token).ConfigureAwait(false);
+        }
+        finally
+        {
+            _flushGate.Release();
+        }
+    }
 
     /// <summary>
     /// Failures where the command provably never reached the leader's log, so resending is safe.
@@ -439,13 +487,16 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             await _cluster.DisposeAsync().ConfigureAwait(false);
         }
 
-        // No shutdown flush: FlushInterval.Zero already checkpointed every commit. An explicit FlushAsync
-        // here would advance the applied checkpoint past the not-yet-snapshotted entries and make the
-        // restart replay skip them.
+        // No shutdown flush is needed for the durability contract: every acknowledged write already
+        // flushed its own entry before returning (DurablyFlushAsync). The only entries that may be
+        // unflushed here are committed-but-unacknowledged ones (their caller will see "shutting down" and
+        // retry) and, on a follower, entries received passively from the leader, which a restart replays
+        // from the leader again.
         if (_wal is not null) await _wal.DisposeAsync().ConfigureAwait(false);
         await _stateMachine.DisposeAsync().ConfigureAwait(false);
         _configStorage.Dispose();
         _fetchGate.Dispose();
+        _flushGate.Dispose();
         _lifetime.Dispose();
     }
 }

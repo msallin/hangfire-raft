@@ -77,9 +77,14 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
   submitter's UTC timestamp, so every replica applies the same updates and converges to the
   same logical state (snapshot byte streams may differ in map ordering; the replicated data does
   not). Keep node clocks reasonably synchronized (NTP) because expirations compare those timestamps.
-* **Durability**: every node persists the log to `WalPath` and periodically compacts it into
-  snapshots. On restart a node replays snapshot + log before serving, then catches up from
-  the leader.
+* **Durability**: a write is flushed to the submitting node's write-ahead log on `WalPath` before
+  it is acknowledged, so an acknowledged write survives a crash of that node; the log is
+  periodically compacted into snapshots, and on restart a node replays snapshot + log before
+  serving, then catches up from the leader. On a multi-node cluster the synchronous flush covers
+  the node that handled the write, while its peers persist the entry through a background flush a
+  moment later, so a simultaneous crash of the whole committing majority before that background
+  flush (for example a single-rack power loss) can still lose a just-committed entry — spread
+  members across failure domains.
 * **Maintenance**: the current leader periodically evicts expired jobs/sets/hashes/lists/
   counters, drops expired lock leases and requeues stale fetches.
 
@@ -111,9 +116,21 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
 * Throughput: every write is a consensus round-trip, and a fetch is a write. This is
   comfortable for typical background-job workloads (hundreds of writes/second on a LAN), but
   it is not a Redis replacement for six-figure jobs-per-minute setups.
+* Hangfire's storage API is synchronous, so each write blocks a worker thread while the cluster
+  replicates, applies and flushes it on the thread pool. Under many concurrent workers, raise the
+  thread-pool floor (`ThreadPool.SetMinThreads`) so those continuations are not starved and a write
+  does not stall to `SubmitTimeout`; the default floor grows by only ~1 thread/second.
 * Job execution is **at-least-once**, like other Hangfire storages: a worker that dies after
   performing a job but before acknowledging it leads to a retry after the invisibility
-  timeout.
+  timeout. For the same reason a write whose commit is ambiguous (the acknowledgement was lost)
+  is retried by Hangfire under a fresh command, so non-idempotent effects — including the
+  dashboard's success/failure **stat counters** — can be applied twice and drift under outages.
+  Keep jobs idempotent.
+* **Observability**: `GetHealth()` reports `AppliedIndex` and `CommitIndex`; their difference is the
+  local apply lag, which lets a readiness probe detect a node serving stale reads even while it
+  still sees a leader. A `Hangfire.Raft` meter publishes counters for ambiguous writes, fetch-lease
+  reclaims (possible duplicate executions) and lock losses, for an OpenTelemetry pipeline or
+  `dotnet-counters`.
 * Locks are not reentrant: acquiring the same resource twice from the same connection
   deadlocks until the timeout, as with most Hangfire storages.
 * A distributed lock is a **lease, not a fence**: a holder that cannot reach the cluster for

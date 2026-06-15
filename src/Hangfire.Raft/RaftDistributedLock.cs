@@ -10,6 +10,13 @@ namespace Hangfire.Raft;
 /// timeout, waking early when any lock is released. The holder renews the lease at a third of the
 /// lease duration; a crashed holder's lease simply expires, so locks cannot leak.
 /// </summary>
+/// <remarks>
+/// This is a <em>lease, not a fence</em>. Expiry is decided by comparing each submitter's wall-clock
+/// timestamp (carried in the command envelope) against the lease, so under node clock skew or a holder
+/// pause longer than <see cref="RaftStorageOptions.LockLeaseTimeout"/>, two owners can believe they hold
+/// the lock at once. There is no fencing token, so do not rely on it for the correctness of
+/// non-idempotent external side effects; treat it as advisory mutual exclusion between idempotent jobs.
+/// </remarks>
 internal sealed class RaftDistributedLock : IDisposable
 {
     private readonly RaftStorageCluster _cluster;
@@ -100,6 +107,7 @@ internal sealed class RaftDistributedLock : IDisposable
                 // exclusion is already broken for this holder; stop renewing so we do not steal
                 // the lock back when the new owner releases it.
                 _renewal.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+                RaftMetrics.LockLosses.Add(1);
                 _cluster.Logger.LogWarning("Distributed lock '{Resource}' was lost to another owner; renewal stopped.", _resource);
             }
         }

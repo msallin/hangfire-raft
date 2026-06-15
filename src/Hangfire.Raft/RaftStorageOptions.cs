@@ -50,6 +50,17 @@ public sealed class RaftStorageOptions
     /// </summary>
     public int SnapshotInterval { get; set; } = 4096;
 
+    /// <summary>
+    /// How the write-ahead log flushes committed entries to disk. <see cref="TimeSpan.Zero"/> (the
+    /// default) runs a background flusher that persists on every commit; on top of that every
+    /// acknowledged write waits for its own entry to be flushed before returning, so an acked write is
+    /// durable across a crash. Internal because production should keep the default: tests set
+    /// <see cref="Timeout.InfiniteTimeSpan"/> to disable the background flusher and make the per-write
+    /// flush the sole durability mechanism, which deterministically proves an acked write survives a
+    /// termination that performs no background flush.
+    /// </summary>
+    internal TimeSpan FlushInterval { get; set; } = TimeSpan.Zero;
+
     /// <summary>Raft election timeout lower bound in milliseconds.</summary>
     public int LowerElectionTimeoutMs { get; set; } = 1500;
 
