@@ -25,6 +25,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     private readonly IReadOnlyList<EndPoint> _clusterMembers;
     private readonly bool _coldStart;
     private readonly string _logPath;
+    private readonly string _configFile;
     private readonly ForwardingServer _forwardingServer;
     private readonly ForwardingClient _forwardingClient = new();
     private readonly CancellationTokenSource _lifetime = new();
@@ -63,7 +64,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     {
         var cluster = _cluster;
         if (cluster is null)
-            return new RaftClusterHealth { HasLeader = false, IsLeader = false, LeaderEndpoint = null, Term = 0, MemberCount = 0 };
+            return new RaftClusterHealth { HasLeader = false, IsLeader = false, LeaderEndpoint = null, Term = 0, MemberCount = 0, Faulted = _stateMachine.IsFaulted };
 
         var leader = cluster.Leader;
         return new RaftClusterHealth
@@ -73,6 +74,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             LeaderEndpoint = leader?.EndPoint,
             Term = cluster.Term,
             MemberCount = cluster.Members.Count,
+            Faulted = _stateMachine.IsFaulted,
         };
     }
 
@@ -92,26 +94,29 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         Directory.CreateDirectory(options.WalPath);
         _logPath = Path.Combine(options.WalPath, "log");
         Directory.CreateDirectory(_logPath);
-        _stateMachine = new HangfireStateMachine(new DirectoryInfo(Path.Combine(options.WalPath, "state")), options.WalRecordsPerPartition, _logger);
+        _stateMachine = new HangfireStateMachine(new DirectoryInfo(Path.Combine(options.WalPath, "state")), options.SnapshotInterval, _logger);
 
         // Bind to a concrete IP, but advertise `self` (a DnsEndPoint when configured by host name) as
         // the public endpoint. DotNext derives member identity from the public endpoint's host, not
         // its resolved address, so identity is stable across IP changes, and it re-resolves the
         // DnsEndPoint on each (re)connection.
         _clusterMembers = options.ClusterMembers;
-        var configFile = Path.Combine(options.WalPath, "config");
+        _configFile = Path.Combine(options.WalPath, "config");
 
         // A lone node on its FIRST start cold-starts: it adds itself to the configuration in committed
         // state and elects itself immediately (term 0), which avoids a contended first election. "First
         // start" is detected by the absence of the persisted config file; on a restart the file exists, so
         // the node resumes (ColdStart=false) and loads its committed membership from disk. Multi-node
         // clusters coordinate the first election (false) and are seeded in SeedConfigurationAsync.
-        _coldStart = _clusterMembers.Count == 1 && !File.Exists(configFile);
+        // The config file and the WAL log both live under WalPath and so share fate: this detection assumes
+        // the state directory is intact as a unit. A config file deleted while the WAL survives would be
+        // misread as a first start, so treat WalPath as atomic (back up or clear it as a whole).
+        _coldStart = _clusterMembers.Count == 1 && !File.Exists(_configFile);
 
         // Persist the cluster membership to disk so a restarted node resumes its committed membership
         // instead of re-seeding it. DotNext's built-in configuration storage is in-memory and forgets it on
         // restart; persisting is the pattern the maintainer recommends (DotNext discussion #207).
-        _configStorage = new EndPointPersistentConfigurationStorage(configFile, EqualityComparer<EndPoint>.Default);
+        _configStorage = new EndPointPersistentConfigurationStorage(_configFile);
         _configuration = new RaftCluster.TcpConfiguration(new IPEndPoint(bindAddress, raftPort))
         {
             LowerElectionTimeout = options.LowerElectionTimeoutMs,
@@ -133,11 +138,12 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         var cluster = new RaftStorageCluster(options);
         try
         {
-            // Restore the latest snapshot into the state machine before building the WAL over it. The
-            // SimpleStateMachine snapshot must be restored explicitly, and the committed log replayed
-            // (below) before we serve, or a restart loses entries committed after the last snapshot.
-            // RaftCluster.StartAsync also calls AuditTrail.InitializeAsync, but that alone is not
-            // sufficient here (verified: dropping these calls fails the WAL-replay tests in isolation).
+            // Restore the latest snapshot into the state machine before building the WAL over it, so the
+            // tail replay below applies on top of the restored state rather than an empty store. This is
+            // the strictly-necessary explicit step: RaftCluster.StartAsync replays the committed tail (via
+            // AuditTrail.InitializeAsync) on its own, but it never restores the SimpleStateMachine
+            // snapshot, so without this a restart would rebuild only the post-snapshot tail and lose
+            // everything the snapshot held (verified: dropping it fails the WAL-replay tests in isolation).
             await cluster._stateMachine.RestoreAsync(token).ConfigureAwait(false);
             var hasExistingLog = Directory.EnumerateFileSystemEntries(cluster._logPath).Any();
 
@@ -147,7 +153,9 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                 new WriteAheadLog.Options { Location = cluster._logPath, FlushInterval = TimeSpan.Zero },
                 cluster._stateMachine);
 
-            // Replay committed-but-unsnapshotted entries on a restart (a fresh node has nothing to replay).
+            // Replay the committed-but-unsnapshotted tail now so the node is fully caught up before it
+            // serves (a fresh node has nothing to replay). RaftCluster.StartAsync calls InitializeAsync
+            // again, but that is idempotent: it only waits for apply, which by then is already complete.
             if (hasExistingLog)
                 await cluster._wal.InitializeAsync(token).ConfigureAwait(false);
 
@@ -181,7 +189,20 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         // A cold-starting lone node adds and persists its sole member via the bootstrap, so skip it here.
         if (_coldStart) return;
 
-        var config = await _configStorage.LoadConfigurationAsync(token).ConfigureAwait(false);
+        IClusterConfiguration<EndPoint> config;
+        try
+        {
+            config = await _configStorage.LoadConfigurationAsync(token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A truncated or corrupt config file makes the endpoint decode throw a low-level IO/format
+            // exception from deep inside the framework. Surface it as a typed storage error that names the
+            // file and the remedy instead, so an operator is not left decoding a framework stack trace.
+            throw new RaftStorageException(
+                $"The persisted cluster configuration at '{_configFile}' could not be read and may be corrupt; delete it to re-seed the membership from RaftStorageOptions.Members.", ex);
+        }
+
         if (config.Members.Count is not 0) return; // a restart already has its membership on disk
 
         foreach (var member in _clusterMembers) config = config.Add(member);
@@ -208,7 +229,10 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         timeout.CancelAfter(_options.SubmitTimeout);
         var linked = timeout.Token;
 
-        var replicated = false; // true once the command reached a committed state (local or forwarded)
+        // True once the command has been handed to the cluster (appended locally, forwarded, or returned an
+        // ambiguous outcome). A timeout after this point may already be committed, so it is surfaced as
+        // ambiguous rather than the always-safe-to-retry "no leader" timeout.
+        var appended = false;
         var waiter = _stateMachine.Waiters.Register(command.Id);
         try
         {
@@ -232,7 +256,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                         // rescheduled leader is reached at its new IP without a restart).
                         var rpcEndpoint = RaftStorageOptions.RpcEndpoint(leader.EndPoint, _options.RpcPortOffset);
                         await _forwardingClient.SubmitAsync(rpcEndpoint, payload, linked).ConfigureAwait(false);
-                        replicated = true;
+                        appended = true;
                         break; // acknowledged as committed
                     }
 
@@ -253,12 +277,13 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                         _logger.LogWarning(ex, "Local replication of command {CommandId} threw after append; treating the outcome as ambiguous and waiting for the local apply.", command.Id);
                     }
 
-                    replicated = true;
+                    appended = true;
                     break;
                 }
                 catch (AmbiguousCommandException ex)
                 {
                     _logger.LogWarning(ex, "Command {CommandId} outcome is ambiguous; waiting for the local apply to decide.", command.Id);
+                    appended = true;
                     break;
                 }
                 catch (Exception ex) when (IsRetryable(ex) && !linked.IsCancellationRequested)
@@ -272,9 +297,14 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         {
-            throw _lifetime.IsCancellationRequested
-                ? new RaftStorageException("The storage is shutting down.")
-                : new RaftStorageException($"The storage write did not complete within {_options.SubmitTimeout} (replicated={replicated}). " + (replicated ? "The entry committed but was not applied in time." : "The cluster may have no leader or no quorum."));
+            if (_lifetime.IsCancellationRequested) throw new RaftStorageException("The storage is shutting down.");
+
+            // A timeout AFTER the command was handed to the cluster is ambiguous (it may already be
+            // committed), so it is surfaced distinctly from a pre-handoff timeout (no leader / no quorum),
+            // which never reached the log and is always safe to retry.
+            throw appended
+                ? new RaftStorageException($"The storage write for command {command.Id} did not apply within {_options.SubmitTimeout}; it was handed to the cluster and may already be committed (ambiguous outcome).")
+                : new RaftStorageException($"The storage write did not reach a leader within {_options.SubmitTimeout}. The cluster may have no leader or no quorum.");
         }
         catch (Exception ex) when (ex is not (RaftStorageException or OperationCanceledException))
         {
@@ -375,9 +405,16 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             {
                 return;
             }
+            catch (RaftStorageException ex)
+            {
+                // Expected while the cluster has no leader or quorum (elections, rolling restarts): the
+                // maintenance submit times out and self-corrects next interval, so it is logged at Debug
+                // rather than filling the log with one warning per interval during an outage.
+                _logger.LogDebug(ex, "Storage maintenance could not run this interval; it will retry next interval.");
+            }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Storage maintenance failed; it will be retried on the next interval.");
+                _logger.LogWarning(ex, "Storage maintenance failed unexpectedly; it will be retried on the next interval.");
             }
         }
     }

@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Sockets;
+using DotNext.Net.Cluster.Consensus.Raft.Membership;
 using Hangfire.Common;
+using Hangfire.Raft.Cluster;
 using Hangfire.States;
 using Hangfire.Storage;
 
@@ -46,13 +48,13 @@ public class RaftJobStorageTests : IDisposable
         }
     }
 
-    private async Task<RaftJobStorage> StartNode(int selfPort, int[] memberPorts, string? walPath = null, int recordsPerPartition = 4096, Action<RaftStorageOptions>? configure = null)
+    private async Task<RaftJobStorage> StartNode(int selfPort, int[] memberPorts, string? walPath = null, int snapshotInterval = 4096, Action<RaftStorageOptions>? configure = null)
     {
         var options = new RaftStorageOptions
         {
             SelfEndpoint = $"127.0.0.1:{selfPort}",
             WalPath = walPath ?? Path.Combine(_walRoot, selfPort.ToString()),
-            WalRecordsPerPartition = recordsPerPartition,
+            SnapshotInterval = snapshotInterval,
             LowerElectionTimeoutMs = 150,
             UpperElectionTimeoutMs = 300,
             SubmitTimeout = TimeSpan.FromSeconds(20),
@@ -253,10 +255,10 @@ public class RaftJobStorageTests : IDisposable
     [Fact]
     public async Task State_SurvivesARestart_ViaWalReplay()
     {
-        var ports = AllocatePortPairs(2);
+        var port = AllocatePortPairs(1)[0];
         string jobId;
 
-        var first = await StartNode(ports[0], [ports[0]]);
+        var first = await StartNode(port, [port]);
         using (var connection = (JobStorageConnection)first.GetConnection())
         {
             jobId = connection.CreateExpiredJob(Job.FromExpression(() => TestJobs.Run("durable")), new Dictionary<string, string>(), DateTime.UtcNow, TimeSpan.FromDays(1));
@@ -265,21 +267,16 @@ public class RaftJobStorageTests : IDisposable
         await first.DisposeAsync();
         _storages.Remove(first);
 
-        // Same WAL directory, fresh ports (the old listener may still be in TIME_WAIT).
-        var walPath = Path.Combine(_walRoot, ports[0].ToString());
-        var options = new RaftStorageOptions
-        {
-            SelfEndpoint = $"127.0.0.1:{ports[1]}",
-            WalPath = walPath,
-            LowerElectionTimeoutMs = 150,
-            UpperElectionTimeoutMs = 300,
-            SubmitTimeout = TimeSpan.FromSeconds(20),
-        };
-        options.Members.Add($"127.0.0.1:{ports[1]}");
-        var second = await RaftJobStorage.StartAsync(options);
-        _storages.Add(second);
+        // Restart on the SAME endpoint and WAL directory, exactly as a real node (e.g. a rescheduled
+        // Kubernetes pod that keeps its identity) does: it loads its committed single-member configuration
+        // from disk (ColdStart=false), re-elects itself, and replays the WAL tail onto the restored
+        // snapshot. Restarting under a different endpoint would leave the node outside its own committed
+        // membership, so it could never re-elect and would surface no committed state -- which is not how a
+        // production restart behaves, and the very durability path this test exercises depends on it.
+        var second = await StartNode(port, [port]);
 
         using var restartedConnection = (JobStorageConnection)second.GetConnection();
+        await PollUntil(() => restartedConnection.GetJobData(jobId) is not null, "the job is replayed after restart");
         var data = restartedConnection.GetJobData(jobId);
         Assert.NotNull(data);
         Assert.Equal("durable", data.Job.Args[0]);
@@ -402,11 +399,11 @@ public class RaftJobStorageTests : IDisposable
         Assert.True(health.HasLeader);
         Assert.True(health.IsLeader);
         Assert.NotNull(health.LeaderEndpoint);
+        Assert.False(health.Faulted);
         // A cold-started single member establishes leadership at the genesis term without a competitive
-        // election, so its term is 0 under DotNext 6.x (multi-node elections still advance the term).
-        // Leadership is verified by the fields above; the reported term need only be non-negative.
-        Assert.True(health.Term >= 0);
-        Assert.True(health.MemberCount >= 1);
+        // election, so its term is exactly 0 under DotNext 6.x (multi-node elections advance the term).
+        Assert.Equal(0L, health.Term);
+        Assert.Equal(1, health.MemberCount);
     }
 
     [Fact]
@@ -436,11 +433,11 @@ public class RaftJobStorageTests : IDisposable
     [Fact]
     public async Task Compaction_SnapshotsTheLog_AndStateSurvivesRestart()
     {
-        var ports = AllocatePortPairs(2);
+        var port = AllocatePortPairs(1)[0];
         var walPath = Path.Combine(_walRoot, "compaction");
 
-        // Small partitions force sequential compaction (snapshot building) during these writes.
-        var first = await StartNode(ports[0], [ports[0]], walPath, recordsPerPartition: 64);
+        // A small snapshot interval forces snapshots (log compaction) during these writes.
+        var first = await StartNode(port, [port], walPath, snapshotInterval: 64);
         string jobId;
         using (var connection = (JobStorageConnection)first.GetConnection())
         {
@@ -454,8 +451,11 @@ public class RaftJobStorageTests : IDisposable
         await first.DisposeAsync();
         _storages.Remove(first);
 
-        var second = await StartNode(ports[1], [ports[1]], walPath, recordsPerPartition: 64);
+        // Restart on the same endpoint/WAL so the node resumes its committed membership and re-elects; it
+        // loads the compacted snapshot and replays any post-snapshot tail on top.
+        var second = await StartNode(port, [port], walPath, snapshotInterval: 64);
         using var restarted = (JobStorageConnection)second.GetConnection();
+        await PollUntil(() => restarted.GetJobData(jobId) is not null, "the compacted state is restored after restart");
         Assert.NotNull(restarted.GetJobData(jobId));
         Assert.Equal("199", restarted.GetValueFromHash("hash-9", "i"));
     }
@@ -635,6 +635,41 @@ public class RaftJobStorageTests : IDisposable
         Assert.True(health.HasLeader);
         Assert.False(health.IsLeader);
         Assert.NotNull(health.LeaderEndpoint);
-        Assert.True(health.MemberCount >= 2);
+        Assert.False(health.Faulted);
+        // All three members are seeded into the committed configuration at genesis, so every node knows
+        // the full set regardless of which is currently reachable.
+        Assert.Equal(3, health.MemberCount);
+    }
+
+    [Fact]
+    public async Task PersistentConfig_RoundTripsIpAndDnsEndpoints()
+    {
+        // The endpoint (de)serialization is custom (it reuses DotNext's EndPointFormatter), so verify both
+        // endpoint shapes survive a save and a reopen from disk: an IP literal must come back as an
+        // IPEndPoint and a host name as a DnsEndPoint. This is the round-trip a restarted node relies on to
+        // resume its committed membership.
+        var dir = Path.Combine(_walRoot, "config-roundtrip");
+        Directory.CreateDirectory(dir);
+        var file = Path.Combine(dir, "config");
+
+        var ip = new IPEndPoint(IPAddress.Loopback, 5000);
+        var dns = new DnsEndPoint("node1.local", 6000);
+
+        using (IClusterConfigurationStorage<EndPoint> storage = new EndPointPersistentConfigurationStorage(file))
+        {
+            var config = await storage.LoadConfigurationAsync();
+            config = config.Add(ip).Add(dns);
+            await storage.SaveConfigurationAsync(config, configurationVersion: 0L);
+        }
+
+        using (IClusterConfigurationStorage<EndPoint> reopened = new EndPointPersistentConfigurationStorage(file))
+        {
+            var config = await reopened.LoadConfigurationAsync();
+            Assert.Equal(2, config.Members.Count);
+            Assert.Contains(ip, config.Members);
+            Assert.Contains(dns, config.Members);
+            // The DNS member must round-trip as a DnsEndPoint, not collapse to a resolved IP address.
+            Assert.Contains(config.Members, m => m is DnsEndPoint { Host: "node1.local", Port: 6000 });
+        }
     }
 }

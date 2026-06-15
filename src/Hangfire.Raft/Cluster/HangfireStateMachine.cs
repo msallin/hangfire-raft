@@ -19,10 +19,18 @@ internal sealed class HangfireStateMachine : SimpleStateMachine
 {
     private readonly ILogger _logger;
     private readonly long _snapshotInterval;
+    private volatile bool _faulted;
 
     public RaftStore Store { get; } = new();
     public ApplyWaiters Waiters { get; } = new();
     public StoreSignals Signals { get; } = new();
+
+    /// <summary>
+    /// True once an apply or snapshot restore has thrown. The node cannot safely make progress after that
+    /// (it is behind the committed log, or has no valid base state), so health probes should report it
+    /// unhealthy and let the orchestrator restart or replace the node.
+    /// </summary>
+    public bool IsFaulted => _faulted;
 
     /// <param name="location">Directory holding the state-machine snapshots.</param>
     /// <param name="snapshotInterval">Take a snapshot every this many applied entries, to keep the log compacted.</param>
@@ -61,6 +69,7 @@ internal sealed class HangfireStateMachine : SimpleStateMachine
                 // pre-validates forwarded commands (see HandleForwardedCommand) and authors its own entries
                 // from round-trip-tested commands, so a healthy same-version cluster never reaches here.
                 _logger.LogError(ex, "Failed to decode the committed log entry at index {Index}; the on-disk state is corrupt or from an incompatible version.", entry.Index);
+                _faulted = true;
                 throw new RaftStorageException($"Failed to decode the committed Raft log entry at index {entry.Index}; the on-disk state may be corrupt or from an incompatible version.", ex);
             }
 
@@ -107,6 +116,7 @@ internal sealed class HangfireStateMachine : SimpleStateMachine
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to load the snapshot at {File}; the on-disk state is corrupt or from an incompatible version.", snapshotFile.FullName);
+            _faulted = true;
             throw new RaftStorageException($"Failed to load the Raft snapshot at {snapshotFile.FullName}; the on-disk state may be corrupt.", ex);
         }
     }

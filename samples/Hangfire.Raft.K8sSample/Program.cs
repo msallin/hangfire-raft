@@ -29,13 +29,23 @@ builder.Services.AddHangfireServer(o => o.WorkerCount = 4);
 
 var app = builder.Build();
 
-// Liveness: the host process is up and serving HTTP.
-app.MapGet("/health", () => Results.Ok("ok"));
+// Liveness: the host process is up and the local state machine has not faulted. A fault (a committed
+// entry that will not apply, or an unreadable snapshot) means the node's on-disk state is corrupt or
+// incompatible and it cannot recover on its own, so we fail liveness to have Kubernetes recycle the pod;
+// per-node recovery is to clear this node's WAL volume so it re-syncs a fresh snapshot from the leader.
+app.MapGet("/health", () => storage.GetHealth().Faulted
+    ? Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+    : Results.Ok("ok"));
 
-// Readiness: the node can serve writes, i.e. the cluster has a leader it can reach or forward to.
-app.MapGet("/ready", () => storage.GetHealth().HasLeader
-    ? Results.Ok("ready")
-    : Results.StatusCode(StatusCodes.Status503ServiceUnavailable));
+// Readiness: the node can serve writes (the cluster has a leader it can reach or forward to) and its
+// state machine is healthy. A leaderless or faulted node is pulled from the Service endpoints.
+app.MapGet("/ready", () =>
+{
+    var health = storage.GetHealth();
+    return health.HasLeader && !health.Faulted
+        ? Results.Ok("ready")
+        : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+});
 
 app.MapPost("/enqueue/{n:int}", (int n) =>
 {

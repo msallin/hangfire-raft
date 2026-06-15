@@ -44,10 +44,11 @@ public sealed class RaftStorageOptions
     public TimeSpan MaintenanceInterval { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Raft log entries per partition file. Compaction squashes full partitions into a snapshot,
-    /// so smaller values snapshot more often. Mainly a tuning and testing knob.
+    /// Take a state-machine snapshot every this many applied log entries; the write-ahead log can then
+    /// compact everything up to that snapshot. Smaller values snapshot more often (smaller log, more
+    /// snapshot churn). Mainly a tuning and testing knob.
     /// </summary>
-    public int WalRecordsPerPartition { get; set; } = 4096;
+    public int SnapshotInterval { get; set; } = 4096;
 
     /// <summary>Raft election timeout lower bound in milliseconds.</summary>
     public int LowerElectionTimeoutMs { get; set; } = 1500;

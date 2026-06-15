@@ -14,12 +14,12 @@ namespace Hangfire.Raft.Cluster;
 /// (de)serialization reuses DotNext's own <see cref="EndPointFormatter"/>, matching the framework's
 /// internal in-memory implementation.
 /// </summary>
-internal sealed class EndPointPersistentConfigurationStorage(string fileName, IEqualityComparer<EndPoint> comparer)
+internal sealed class EndPointPersistentConfigurationStorage(string fileName)
     : PersistentClusterConfigurationStorage<EndPoint>(fileName)
 {
     protected override void Encode(EndPoint address, ref BufferWriterSlim<byte> writer) => writer.WriteEndPoint(address);
 
     protected override EndPoint Decode(ref SequenceReader reader) => reader.ReadEndPoint();
 
-    protected override IEqualityComparer<EndPoint> Comparer => comparer;
+    protected override IEqualityComparer<EndPoint> Comparer => EqualityComparer<EndPoint>.Default;
 }

@@ -27,4 +27,11 @@ public sealed record RaftClusterHealth
 
     /// <summary>Number of configured cluster members.</summary>
     public required int MemberCount { get; init; }
+
+    /// <summary>
+    /// True when the local state machine has faulted (a committed entry failed to apply, or a snapshot
+    /// failed to restore). A faulted node cannot make safe progress, so a liveness probe should fail on
+    /// this and let the orchestrator restart the node; readiness should also treat it as not ready.
+    /// </summary>
+    public required bool Faulted { get; init; }
 }
