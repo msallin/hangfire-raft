@@ -81,11 +81,11 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     private RaftStorageCluster(RaftStorageOptions options)
     {
         _options = options;
-        _logger = (ILoggerFactory?)options.LoggerFactory is { } factory
+        _logger = options.LoggerFactory is { } factory
             ? factory.CreateLogger("Hangfire.Raft")
             : NullLogger.Instance;
 
-        var self = options.Self;                                   // EndPoint: DnsEndPoint for host names, IPEndPoint for IP literals
+        var self = options.Self;
         var raftPort = RaftStorageOptions.PortOf(self);
         var bindAddress = RaftStorageOptions.BindAddressFor(self);
 
@@ -123,7 +123,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             UpperElectionTimeout = options.UpperElectionTimeoutMs,
             PublicEndPoint = self,
             ColdStart = _coldStart,
-            LoggerFactory = options.LoggerFactory as ILoggerFactory ?? NullLoggerFactory.Instance,
+            LoggerFactory = options.LoggerFactory ?? NullLoggerFactory.Instance,
             ConfigurationStorage = _configStorage,
         };
 

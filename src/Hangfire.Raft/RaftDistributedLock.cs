@@ -60,11 +60,11 @@ internal sealed class RaftDistributedLock : IDisposable
         var op = Command.Single(new TryAcquireLockOp(resource, owner, cluster.Options.LockLeaseTimeout));
 
         // When the remaining budget is at least a full submit timeout, the submit's own timeout already
-        // bounds the attempt, so submit unbounded (preserving the prior behavior). Otherwise cap the
-        // attempt at the remaining budget so the caller's short timeout is respected even while the
-        // cluster is unavailable. A submit that never reaches a leader is not appended, so cancelling it
-        // cannot leave a half-applied lock; the narrow case where the entry was appended just before the
-        // cancel resolves itself once the lease expires.
+        // bounds the attempt, so submit unbounded. Otherwise cap the attempt at the remaining budget so
+        // the caller's short timeout is respected even while the cluster is unavailable. A submit that
+        // never reaches a leader is not appended, so cancelling it cannot leave a half-applied lock; the
+        // narrow case where the entry was appended just before the cancel resolves itself once the lease
+        // expires.
         if (remaining >= cluster.Options.SubmitTimeout)
             return (bool)cluster.Submit(op)!;
 

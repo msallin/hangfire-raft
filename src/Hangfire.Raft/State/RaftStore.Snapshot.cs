@@ -7,8 +7,11 @@ internal sealed partial class RaftStore
     private const byte SnapshotVersion = 1;
 
     /// <summary>
-    /// Serializes the full store state under the store lock. During log compaction this runs on the
-    /// snapshot builder's shadow store, so the live store never blocks on snapshot writing.
+    /// Serializes the full store state. The whole snapshot is materialized into the writer's buffer
+    /// while holding the store lock; this must stay fully under the lock because DotNext spawns the
+    /// snapshot against the live store and only gates the NEXT apply behind its completion, so a
+    /// serialization that released the lock mid-pass (e.g. streaming entries out one at a time) could
+    /// observe a torn store. Mutations block for the duration; reads do not.
     /// </summary>
     public void WriteSnapshot(BinaryWriter w)
     {

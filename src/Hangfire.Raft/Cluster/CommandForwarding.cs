@@ -126,12 +126,15 @@ internal sealed class ForwardingServer : IAsyncDisposable
     private async Task ServeConnection(TcpClient client)
     {
         using var _ = client;
-        client.NoDelay = true;
-        var stream = client.GetStream();
-        var header = new byte[8];
-
         try
         {
+            // Inside the try so a peer that resets the freshly accepted socket (making NoDelay or
+            // GetStream throw) is logged like any other connection failure, not left as a faulted
+            // fire-and-forget task with an unobserved exception.
+            client.NoDelay = true;
+            var stream = client.GetStream();
+            var header = new byte[8];
+
             while (!_lifetime.IsCancellationRequested)
             {
                 try
@@ -247,7 +250,7 @@ internal sealed class ForwardingClient : IDisposable
             var status = responseHeader[0];
             var messageLength = BinaryPrimitives.ReadInt32LittleEndian(responseHeader.AsSpan(1));
             if (messageLength is < 0 or > ForwardingProtocol.MaxPayloadLength) throw new IOException("Invalid forwarding response.");
-            var message = Array.Empty<byte>();
+            byte[] message = [];
             if (messageLength > 0)
             {
                 message = new byte[messageLength];

@@ -8,13 +8,6 @@ using Hangfire.Storage;
 
 namespace Hangfire.Raft.Tests;
 
-public static class TestJobs
-{
-    public static void Run(string argument)
-    {
-    }
-}
-
 /// <summary>
 /// End-to-end tests against real Raft clusters on loopback: write-ahead log in a temp directory,
 /// real elections, real TCP transport and command forwarding.
@@ -417,8 +410,7 @@ public class RaftJobStorageTests : IDisposable
     [Fact]
     public async Task StartAsync_DoesNotThrow_WhenAPeerHostnameIsUnresolvable()
     {
-        // The old code resolved every member's DNS eagerly and threw on a miss, crashing startup.
-        // Now members are DnsEndPoints resolved lazily by the transport, so an unresolvable peer is
+        // Members are DnsEndPoints resolved lazily by the transport, so an unresolvable peer is
         // tolerated: the node starts, cannot reach the bogus member, and simply has no quorum.
         var port = AllocatePortPairs(1)[0];
         var options = new RaftStorageOptions

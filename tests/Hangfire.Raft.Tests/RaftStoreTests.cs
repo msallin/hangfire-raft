@@ -774,7 +774,7 @@ public class RaftStoreTests
     [Fact]
     public void LoadSnapshot_LeavesExistingStateIntact_WhenIncomingSnapshotIsCorrupt()
     {
-        // CC-001: a failed load is atomic. Populate the store, then feed it a truncated snapshot taken
+        // A failed load is atomic. Populate the store, then feed it a truncated snapshot taken
         // from a different state. The incoming bytes are parsed into a throwaway store and only swapped
         // in on success, so after the load throws the live store must be byte-identical to before, never
         // half-wiped nor partially overwritten with the incoming data.
@@ -915,7 +915,7 @@ public class RaftStoreTests
         Assert.Equal(0, _store.GetSetCount(["s1", "s2"], 0));    // limit 0
         Assert.Equal(4, _store.GetSetCount(["s1", "s2"], 4));    // capped below the actual 5
         Assert.Equal(5, _store.GetSetCount(["s1", "s2"], 100));  // actual, under the limit
-        Assert.True(_store.GetSetCount(["s1", "s2"], 4) <= 4);   // never exceeds the limit (HF-001 was a false positive)
+        Assert.True(_store.GetSetCount(["s1", "s2"], 4) <= 4);   // never exceeds the limit
     }
 
     [Fact]

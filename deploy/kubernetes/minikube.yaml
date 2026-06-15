@@ -69,6 +69,8 @@ spec:
     spec:
       securityContext:            # drop root: the pod and its WAL must not run/own as uid 0
         runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault    # required by the "restricted" Pod Security Standard
         # fsGroup makes the PVC-backed /data/wal group-owned by this gid so the non-root user
         # (runAsUser on the container) can write the write-ahead log. It must match runAsUser and the
         # Dockerfile USER, or the node fails to open the WAL.
@@ -82,7 +84,7 @@ spec:
                 labelSelector:
                   matchLabels:
                     app: hangfire
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 45   # > SubmitTimeout (30s) + WAL-close, so SIGKILL never lands mid-close
       containers:
         - name: app
           image: hangfire-raft-sample:local
@@ -112,16 +114,26 @@ spec:
           volumeMounts:
             - name: wal
               mountPath: /data/wal
+            - name: tmp
+              mountPath: /tmp             # writable scratch for the .NET diagnostics socket under a read-only root
+          # Startup probe gates liveness/readiness until WAL replay finishes and the HTTP listener binds;
+          # liveness then watches /health, which fails only on a faulted state machine (mirrors production).
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 60
           livenessProbe:
-            tcpSocket:
-              port: 5000
-            initialDelaySeconds: 15
+            httpGet:
+              path: /health              # 503 only when the state machine has faulted -> recycle the pod
+              port: 8080
             periodSeconds: 20
+            failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /ready          # 200 only when the node can reach a leader (has quorum)
+              path: /ready               # 200 only when the node can reach a leader (has quorum)
               port: 8080
-            initialDelaySeconds: 10
             periodSeconds: 10
           resources:
             requests:
@@ -133,8 +145,12 @@ spec:
             runAsNonRoot: true
             runAsUser: 64198              # matches fsGroup above and the Dockerfile USER (keeps /data/wal writable)
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true  # the app writes only to the WAL PVC and the /tmp emptyDir above
             capabilities:
               drop: [ "ALL" ]
+      volumes:
+        - name: tmp               # ephemeral scratch so the container root can stay read-only
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: wal
