@@ -24,6 +24,16 @@ jobs:
       - name: Build
         run: dotnet build Hangfire.Raft.slnx -c Release --no-restore
 
+      - name: Enable automated test report artifact upload
+        # ACTIONS_RUNTIME_TOKEN and ACTIONS_RESULTS_URL are only exposed to JS/Docker action handlers, not
+        # to shell `run:` steps, so the Microsoft.Testing.Platform test process cannot upload its report
+        # artifacts on its own. Re-export them into the job environment so the next step's `dotnet test` can.
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env['ACTIONS_RUNTIME_TOKEN']);
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env['ACTIONS_RESULTS_URL']);
+
       - name: Test
         # Run the write-ahead logs on tmpfs so the fsync-on-every-commit clusters do not contend on the
         # runner's disk, which otherwise pushes co-located cluster tests past their election/submit
