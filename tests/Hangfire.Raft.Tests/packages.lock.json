@@ -194,7 +194,7 @@
           "TUnit.Core": "1.56.0"
         }
       },
-      "hangfire.raft": {
+      "Hangfire.Community.Raft": {
         "type": "Project",
         "dependencies": {
           "DotNext.Net.Cluster": "[6.3.0, )",
