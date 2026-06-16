@@ -1,7 +1,7 @@
 # Hangfire.Raft
 
 [![CI](https://github.com/msallin/hangfire-raft/actions/workflows/ci.yml/badge.svg)](https://github.com/msallin/hangfire-raft/actions/workflows/ci.yml)
-[![NuGet](https://img.shields.io/nuget/v/Hangfire.Raft.svg)](https://www.nuget.org/packages/Hangfire.Raft)
+[![NuGet](https://img.shields.io/nuget/v/Hangfire.Community.Raft.svg)](https://www.nuget.org/packages/Hangfire.Community.Raft)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/msallin/hangfire-raft/blob/main/LICENSE)
 
 Hangfire job storage backed by a [DotNext](https://github.com/dotnet/dotNext) Raft cluster.
