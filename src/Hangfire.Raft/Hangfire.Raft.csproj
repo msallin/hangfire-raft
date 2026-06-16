@@ -10,7 +10,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <PackageId>Hangfire.Raft</PackageId>
+    <PackageId>Hangfire.Community.Raft</PackageId>
     <Version>0.1.0</Version>
     <Authors>Marc Sallin</Authors>
     <Description>Hangfire job storage backed by a DotNext Raft cluster. State is replicated in-memory across nodes with a write-ahead log on disk; no external database required.</Description>
