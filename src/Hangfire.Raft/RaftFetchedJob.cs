@@ -75,9 +75,11 @@ internal sealed class RaftFetchedJob : IFetchedJob
                 // A renewal that simply lost the race with a clean Ack/Requeue also gets `false` here
                 // (the lease is already gone). Only warn about a genuine reclaim of an in-flight job,
                 // not about one that already completed, to avoid a misleading "may run twice" log.
+                // The reclaim is metered on the maintenance side (RaftStorageCluster.MaintenanceLoop), which
+                // owns the count authoritatively so the dead-worker case (no live renewer to observe it) is
+                // also captured; this per-worker warning is the local breadcrumb for THIS job's double run.
                 if (!_completed && !_disposed)
                 {
-                    RaftMetrics.FetchLeaseReclaims.Add(1);
                     _cluster.Logger.LogWarning("Fetch lease for job {JobId} expired and was reclaimed; the job may run a second time.", JobId);
                 }
             }
@@ -113,9 +115,12 @@ internal sealed class RaftFetchedJob : IFetchedJob
             {
                 Requeue();
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // The invisibility timeout reclaims the job if the requeue cannot reach the cluster.
+                // The invisibility timeout reclaims the job if the requeue cannot reach the cluster, so this
+                // is not a loss; but the job then stays invisible for the full FetchInvisibilityTimeout
+                // instead of being requeued promptly, so warn to make that delayed re-run correlatable.
+                _cluster.Logger.LogWarning(ex, "Could not requeue job {JobId} on dispose; it becomes visible again only after the fetch invisibility timeout.", JobId);
             }
         }
 

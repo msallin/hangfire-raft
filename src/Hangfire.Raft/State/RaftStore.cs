@@ -122,8 +122,13 @@ internal sealed partial class RaftStore
                     // Always drop the lease; re-enqueue only if the job still exists. Maintenance never
                     // evicts a job while it is fetched, so this existence guard is defensive (it matches
                     // the stale-fetch reclaim in RunMaintenance).
-                    if (_fetched.Remove(o.FetchToken, out var fetched) && _jobs.ContainsKey(fetched.JobId))
+                    if (_fetched.Remove(o.FetchToken, out var fetched) && _jobs.TryGetValue(fetched.JobId, out var job))
                     {
+                        // A re-enqueued job is runnable again, so clear any pending expiry. Without this, a job
+                        // whose ExpireAt already elapsed while it was fetched (an ExpireJob that raced the fetch)
+                        // would be put back on the queue only to be evicted by the next maintenance pass with
+                        // zero executions. ExpireAt is not part of the state index, so clearing it here is safe.
+                        job.ExpireAt = null;
                         Queue(fetched.Queue).AddFirst(fetched.JobId);
                         effects.SignalQueue(fetched.Queue);
                     }
@@ -291,10 +296,9 @@ internal sealed partial class RaftStore
                     return null;
                 }
             case MaintenanceOp o:
-                {
-                    RunMaintenance(o, now, effects);
-                    return null;
-                }
+                // The summary is returned as the op result so the submitting (leader) node can log and meter
+                // the outcome once, instead of every replica logging from its deterministic apply.
+                return RunMaintenance(o, now, effects);
             default:
                 throw new NotSupportedException($"Op {op.GetType().Name} has no apply handler.");
         }
@@ -308,7 +312,7 @@ internal sealed partial class RaftStore
         set.Sorted.Add(new SetItem(score, value));
     }
 
-    private void RunMaintenance(MaintenanceOp op, DateTime now, ApplyEffects effects)
+    private MaintenanceSummary RunMaintenance(MaintenanceOp op, DateTime now, ApplyEffects effects)
     {
         // Never evict a job that is currently held under a fetch lease: the worker (or the stale-fetch
         // reclaim below) still needs it. Otherwise an ExpireJob racing an in-flight fetch could drop the
@@ -326,6 +330,9 @@ internal sealed partial class RaftStore
         // that removes a job removes its queue references in the same pass; nothing else enqueues a
         // non-existent id), so this O(total queued) walk is only needed when something was evicted.
         // The branch is deterministic across nodes (evictedJobs is a pure function of the envelope time).
+        // A nonzero count means an enqueued job was dropped along with the queue entry pointing at it,
+        // which the leader surfaces as a warning (see RaftStorageCluster.MaintenanceLoop).
+        var orphanedQueueEntries = 0;
         if (evictedJobs.Count > 0)
         {
             foreach (var queue in _queues.Values)
@@ -334,21 +341,29 @@ internal sealed partial class RaftStore
                 while (node is not null)
                 {
                     var next = node.Next;
-                    if (!_jobs.ContainsKey(node.Value)) queue.Remove(node);
+                    if (!_jobs.ContainsKey(node.Value))
+                    {
+                        queue.Remove(node);
+                        orphanedQueueEntries++;
+                    }
+
                     node = next;
                 }
             }
         }
 
-        EvictExpired(_sets, e => e.ExpireAt, now);
-        EvictExpired(_lists, e => e.ExpireAt, now);
-        EvictExpired(_hashes, e => e.ExpireAt, now);
-        EvictExpired(_counters, e => e.ExpireAt, now);
+        var expiredCollections =
+            EvictExpired(_sets, e => e.ExpireAt, now)
+            + EvictExpired(_lists, e => e.ExpireAt, now)
+            + EvictExpired(_hashes, e => e.ExpireAt, now)
+            + EvictExpired(_counters, e => e.ExpireAt, now);
 
+        var expiredLocks = 0;
         foreach (var resource in _locks.Where(kv => kv.Value.ExpiresAt <= now).Select(kv => kv.Key).ToList())
         {
             _locks.Remove(resource);
             effects.LocksReleased = true;
+            expiredLocks++;
         }
 
         // Requeue order must not depend on Dictionary enumeration order: that order differs between
@@ -361,25 +376,37 @@ internal sealed partial class RaftStore
             .ThenByDescending(kv => kv.Value.JobId, StringComparer.Ordinal)
             .ThenByDescending(kv => kv.Key)
             .ToList();
+        var staleReclaimed = 0;
         foreach (var (token, fetched) in stale)
         {
             _fetched.Remove(token);
-            if (_jobs.ContainsKey(fetched.JobId))
+            if (_jobs.TryGetValue(fetched.JobId, out var job))
             {
+                // The lease is being reclaimed because no worker renewed it (a crashed/partitioned worker,
+                // or one that stalled past the invisibility timeout); the job is about to run again. Clear
+                // any pending expiry so the re-enqueued job is not evicted by the NEXT maintenance pass: it
+                // is no longer in fetchedJobIds, so without this an expired-while-fetched job would be lost
+                // here with zero executions. Each reclaim means a possible duplicate run, surfaced by the
+                // leader as a warning + metric (see RaftStorageCluster.MaintenanceLoop).
+                job.ExpireAt = null;
                 Queue(fetched.Queue).AddFirst(fetched.JobId);
                 effects.SignalQueue(fetched.Queue);
+                staleReclaimed++;
             }
         }
 
         // Queues whose last item was consumed disappear, matching how SQL-backed storages behave.
         foreach (var name in _queues.Where(kv => kv.Value.Count == 0).Select(kv => kv.Key).ToList())
             _queues.Remove(name);
+
+        return new MaintenanceSummary(evictedJobs.Count, orphanedQueueEntries, staleReclaimed, expiredLocks, expiredCollections);
     }
 
-    private static void EvictExpired<TEntry>(Dictionary<string, TEntry> table, Func<TEntry, DateTime?> expireAt, DateTime now)
+    private static int EvictExpired<TEntry>(Dictionary<string, TEntry> table, Func<TEntry, DateTime?> expireAt, DateTime now)
     {
-        foreach (var key in table.Where(kv => expireAt(kv.Value) is { } e && e <= now).Select(kv => kv.Key).ToList())
-            table.Remove(key);
+        var expired = table.Where(kv => expireAt(kv.Value) is { } e && e <= now).Select(kv => kv.Key).ToList();
+        foreach (var key in expired) table.Remove(key);
+        return expired.Count;
     }
 
     private LinkedList<string> Queue(string name)
@@ -419,3 +446,15 @@ internal sealed class ApplyEffects
 
     public void SignalQueue(string queue) => (SignaledQueues ??= []).Add(queue);
 }
+
+/// <summary>
+/// What a single maintenance pass changed. Returned as the <see cref="MaintenanceOp"/> apply result so the
+/// submitting (leader) node can log and meter it once, rather than every replica logging from its
+/// deterministic apply. The counts are a pure function of the committed command, so they match on every node.
+/// </summary>
+internal sealed record MaintenanceSummary(
+    int EvictedJobs,
+    int OrphanedQueueEntriesRemoved,
+    int StaleFetchesReclaimed,
+    int ExpiredLocksReleased,
+    int ExpiredCollections);

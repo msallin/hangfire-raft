@@ -709,6 +709,61 @@ public class RaftStoreTests
     }
 
     [Test]
+    public async Task Maintenance_DoesNotLose_AReclaimedExpiredJob_OnTheNextPass()
+    {
+        // A job whose expiry elapsed while it was held under a fetch lease (an ExpireJob that raced the
+        // fetch) is protected while the lease is live. Once the lease goes stale and is reclaimed the job is
+        // re-enqueued to run again; the reclaim must clear its expiry, otherwise the NEXT maintenance pass --
+        // where the job is no longer fetch-protected -- would evict it with zero executions and strip it from
+        // the queue. This is the cross-pass silent-loss regression.
+        Apply(T0, NewJob("a"), new EnqueueOp("q", "a"));
+        var token = Guid.NewGuid();
+        Apply(T0, new FetchOp(["q"], token));
+        Apply(T0, new ExpireJobOp("a", T0.AddMinutes(1)));
+
+        // Pass 1: the lease is stale (10min elapsed > 5min invisibility), so the job is reclaimed, re-enqueued
+        // and its expiry cleared. It is reported in the summary so the leader can warn about the possible re-run.
+        var summary = (MaintenanceSummary)Apply(T0.AddMinutes(10), new MaintenanceOp(TimeSpan.FromMinutes(5)))!;
+        await Assert.That(summary.StaleFetchesReclaimed).IsEqualTo(1);
+        await Assert.That(_store.GetJob("a")!.ExpireAt).IsNull();
+        await Assert.That(_store.GetQueueLength("q")).IsEqualTo(1);
+
+        // Pass 2: the job is no longer fetch-protected. With expiry cleared on reclaim it survives; without
+        // the fix it would be evicted here and dropped from the queue.
+        Apply(T0.AddMinutes(20), new MaintenanceOp(TimeSpan.FromMinutes(5)));
+        await Assert.That(_store.GetJob("a")).IsNotNull();
+        await Assert.That(_store.GetQueueLength("q")).IsEqualTo(1);
+    }
+
+    [Test]
+    public async Task RequeueFetched_ClearsExpiry_SoARequeuedExpiredJobSurvivesMaintenance()
+    {
+        Apply(T0, NewJob("a"), new EnqueueOp("q", "a"));
+        var token = Guid.NewGuid();
+        Apply(T0, new FetchOp(["q"], token));
+        Apply(T0, new ExpireJobOp("a", T0.AddMinutes(1)));
+
+        Apply(T0, new RequeueFetchedOp(token)); // re-enqueued to run again -> expiry cleared
+        await Assert.That(_store.GetJob("a")!.ExpireAt).IsNull();
+
+        Apply(T0.AddMinutes(10), new MaintenanceOp(TimeSpan.FromMinutes(5)));
+        await Assert.That(_store.GetJob("a")).IsNotNull();
+        await Assert.That(_store.GetQueueLength("q")).IsEqualTo(1);
+    }
+
+    [Test]
+    public async Task Maintenance_Summary_ReportsEvictionAndReclaimCounts()
+    {
+        // A genuinely expired, unfetched job is evicted and reported; no lease is stale, so no reclaim.
+        Apply(T0, NewJob("a"), new SetJobStateOp("a", State("Succeeded", T0)), new ExpireJobOp("a", T0.AddMinutes(1)));
+
+        var summary = (MaintenanceSummary)Apply(T0.AddMinutes(2), new MaintenanceOp(TimeSpan.FromMinutes(5)))!;
+        await Assert.That(summary.EvictedJobs).IsEqualTo(1);
+        await Assert.That(summary.StaleFetchesReclaimed).IsEqualTo(0);
+        await Assert.That(_store.GetJob("a")).IsNull();
+    }
+
+    [Test]
     public async Task Counter_IsRecreated_AfterReachingZero()
     {
         Apply(T0, new IncrementCounterOp("c", 1, null));
