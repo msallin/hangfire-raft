@@ -147,6 +147,13 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         var cluster = new RaftStorageCluster(options);
         try
         {
+            // Make the boot decision observable: an operator needs to tell a brand-new cold start apart from
+            // a resume-from-disk, especially because a deleted config file with a surviving WAL is misread as
+            // a first start (see the _coldStart comment) and silently re-seeds a one-member cluster.
+            cluster._logger.LogInformation(
+                "Starting Raft node {Self}: coldStart={ColdStart}, configuredMembers={Members}, walPath={WalPath}.",
+                options.Self, cluster._coldStart, cluster._clusterMembers.Count, options.WalPath);
+
             // Restore the latest snapshot into the state machine before building the WAL over it, so the
             // tail replay below applies on top of the restored state rather than an empty store. This is
             // the strictly-necessary explicit step: RaftCluster.StartAsync replays the committed tail (via
@@ -171,6 +178,10 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             if (hasExistingLog)
                 await cluster._wal.InitializeAsync(token).ConfigureAwait(false);
 
+            cluster._logger.LogInformation(
+                "Raft node {Self} restored local state: existingLog={HasLog}, appliedIndex={Applied}, committedIndex={Committed}.",
+                options.Self, hasExistingLog, cluster._wal.LastAppliedIndex, cluster._wal.LastCommittedEntryIndex);
+
             cluster._cluster = new RaftCluster(cluster._configuration) { AuditTrail = cluster._wal };
 
             // Seed a multi-node cluster's committed membership on first start so it forms regardless of
@@ -181,6 +192,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             cluster._forwardingServer.Start();
             await cluster._cluster.StartAsync(token).ConfigureAwait(false);
             cluster._maintenanceLoop = cluster.MaintenanceLoop();
+            cluster._logger.LogInformation("Raft node {Self} started; forwarding RPC on port +{Offset}.", options.Self, options.RpcPortOffset);
             return cluster;
         }
         catch
@@ -219,6 +231,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
 
         foreach (var member in _clusterMembers) config = config.Add(member);
         await _configStorage.SaveConfigurationAsync(config, configurationVersion: 0L, token).ConfigureAwait(false);
+        _logger.LogInformation("Seeded genesis cluster membership with {Members} member(s).", _clusterMembers.Count);
     }
 
     /// <summary>
@@ -234,6 +247,18 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         // A worker that submits during/after shutdown gets the documented storage exception rather
         // than a raw ObjectDisposedException from the cancellation source it is about to link.
         if (_lifetime.IsCancellationRequested) throw new RaftStorageException("The storage is shutting down.");
+
+        // A faulted state machine can no longer apply committed entries, so the local apply that completes
+        // this write's waiter will never run: the write would otherwise block for the full SubmitTimeout and
+        // then surface a misleading "ambiguous timeout" with no hint at the cause. Fail fast so the persistent
+        // fault is visible on every attempt (the root cause is logged once when the fault first happens) and
+        // points at the remedy. Recover the node by clearing its WAL to re-sync from the leader, or let an
+        // orchestrator restart it via the GetHealth().Faulted probe.
+        if (_stateMachine.IsFaulted)
+        {
+            _logger.LogWarning("Rejecting command {CommandId}: the local state machine has faulted and can no longer apply committed entries; recover this node (clear its WAL to re-sync from the leader).", command.Id);
+            throw new RaftStorageException("The local state machine has faulted; this node cannot serve writes until it is recovered.");
+        }
 
         var cluster = _cluster!; // non-null once StartAsync has returned, which is before any submit
 
@@ -262,13 +287,22 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                         continue;
                     }
 
+                    // From here the command is being handed to the cluster and may be appended to the log, so
+                    // mark it appended NOW, before the await. This is what makes a timeout that fires DURING
+                    // the hand-off (the SubmitTimeout cancelling `linked` mid-replicate or mid-forward, which
+                    // throws an OperationCanceledException the inner catches deliberately do not convert) be
+                    // surfaced as ambiguous rather than as the safe-to-retry "no leader" outcome that would
+                    // let Hangfire retry a possibly-committed non-idempotent op. A provably-not-appended
+                    // failure (NotLeader / could-not-deliver / leader-wait timeout) is retryable and resets
+                    // this flag below before looping, so a never-appended command is not mislabelled ambiguous.
+                    appended = true;
+
                     if (leader.IsRemote)
                     {
                         // Forward by the leader's own endpoint form (a DnsEndPoint re-resolves, so a
                         // rescheduled leader is reached at its new IP without a restart).
                         var rpcEndpoint = RaftStorageOptions.RpcEndpoint(leader.EndPoint, _options.RpcPortOffset);
                         await _forwardingClient.SubmitAsync(rpcEndpoint, payload, linked).ConfigureAwait(false);
-                        appended = true;
                         break; // acknowledged as committed
                     }
 
@@ -289,17 +323,18 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                         _logger.LogWarning(ex, "Local replication of command {CommandId} threw after append; treating the outcome as ambiguous and waiting for the local apply.", command.Id);
                     }
 
-                    appended = true;
                     break;
                 }
                 catch (AmbiguousCommandException ex)
                 {
                     _logger.LogWarning(ex, "Command {CommandId} outcome is ambiguous; waiting for the local apply to decide.", command.Id);
-                    appended = true;
-                    break;
+                    break; // appended is already true (set before the hand-off)
                 }
                 catch (Exception ex) when (IsRetryable(ex) && !linked.IsCancellationRequested)
                 {
+                    // Provably not appended (NotLeader / could-not-deliver / leader-wait timeout): safe to
+                    // resend, so re-classify the outcome as not-yet-handed-off before retrying.
+                    appended = false;
                     _logger.LogWarning(ex, "Command {CommandId} submission failed before reaching the leader, retrying.", command.Id);
                     await Task.Delay(TimeSpan.FromMilliseconds(100), linked).ConfigureAwait(false);
                 }
@@ -415,9 +450,17 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             try
             {
                 await Task.Delay(_options.MaintenanceInterval, _lifetime.Token).ConfigureAwait(false);
+
+                // Every node samples its read staleness each interval, not just the leader: a partitioned
+                // follower keeps reporting HasLeader while its local apply falls behind the committed log and
+                // serves increasingly stale reads. This is the only place that hazard surfaces from logs
+                // alone; otherwise only an external GetHealth() poller can observe it.
+                WarnIfReadsAreStale();
+
                 if (_cluster?.Leader is { IsRemote: false })
                 {
-                    await SubmitAsync(Command.Single(new MaintenanceOp(_options.FetchInvisibilityTimeout)), _lifetime.Token).ConfigureAwait(false);
+                    var result = await SubmitAsync(Command.Single(new MaintenanceOp(_options.FetchInvisibilityTimeout)), _lifetime.Token).ConfigureAwait(false);
+                    if (result is MaintenanceSummary summary) LogMaintenance(summary);
                 }
             }
             catch (OperationCanceledException)
@@ -436,6 +479,44 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                 _logger.LogWarning(ex, "Storage maintenance failed unexpectedly; it will be retried on the next interval.");
             }
         }
+    }
+
+    /// <summary>
+    /// Surfaces what a maintenance pass changed. Runs only on the leader (the sole node that submits
+    /// maintenance), so each event is logged and metered once per pass cluster-wide rather than once per
+    /// replica. Stale-fetch reclaims are metered here authoritatively (the per-worker path in
+    /// <see cref="RaftFetchedJob"/> only sees reclaims of jobs whose worker is still alive; a crashed or
+    /// partitioned worker -- the dominant cause -- has no live renewer, so the leader is the only observer).
+    /// </summary>
+    private void LogMaintenance(MaintenanceSummary summary)
+    {
+        if (summary.StaleFetchesReclaimed > 0)
+        {
+            RaftMetrics.FetchLeaseReclaims.Add(summary.StaleFetchesReclaimed);
+            _logger.LogWarning("Maintenance reclaimed {Count} stale fetch lease(s) past the invisibility timeout; the affected job(s) will run again.", summary.StaleFetchesReclaimed);
+        }
+
+        // A dropped queue entry means an enqueued job was evicted (its expiry elapsed while it sat queued).
+        // That should not normally happen to an active job, so it is worth an operator's attention.
+        if (summary.OrphanedQueueEntriesRemoved > 0)
+            _logger.LogWarning("Maintenance dropped {Count} queue entry/entries pointing at an evicted (expired) job.", summary.OrphanedQueueEntriesRemoved);
+
+        if (summary.EvictedJobs > 0 || summary.ExpiredCollections > 0 || summary.ExpiredLocksReleased > 0)
+            _logger.LogDebug("Maintenance evicted {Jobs} expired job(s) and {Collections} expired collection(s), and released {Locks} expired lock(s).", summary.EvictedJobs, summary.ExpiredCollections, summary.ExpiredLocksReleased);
+    }
+
+    /// <summary>Warns when this node's local apply trails the committed log by more than the configured threshold, meaning its reads are stale.</summary>
+    private void WarnIfReadsAreStale()
+    {
+        var threshold = _options.ReadStalenessWarningThreshold;
+        if (threshold <= 0) return; // disabled
+
+        var wal = _wal;
+        if (wal is null) return;
+
+        var lag = wal.LastCommittedEntryIndex - wal.LastAppliedIndex;
+        if (lag > threshold)
+            _logger.LogWarning("Local apply is lagging the committed log by {Lag} entries (applied={Applied}, committed={Committed}); reads served by this node are stale.", lag, wal.LastAppliedIndex, wal.LastCommittedEntryIndex);
     }
 
     public async ValueTask DisposeAsync()

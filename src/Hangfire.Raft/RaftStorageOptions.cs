@@ -71,8 +71,48 @@ public sealed class RaftStorageOptions
     /// <summary>Raft election timeout upper bound in milliseconds.</summary>
     public int UpperElectionTimeoutMs { get; set; } = 3000;
 
+    /// <summary>
+    /// Warn (at most once per <see cref="MaintenanceInterval"/>) when this node's local apply trails the
+    /// committed log by more than this many entries, meaning its reads (dashboard, read-your-writes) are
+    /// stale — the signature of a partitioned follower that still reports a leader. Set to 0 or negative to
+    /// disable. The default is high enough to stay quiet during normal small catch-ups and only fire when a
+    /// node is genuinely far behind.
+    /// </summary>
+    public long ReadStalenessWarningThreshold { get; set; } = 4096;
+
     /// <summary>Optional logger factory for cluster and storage diagnostics.</summary>
     public ILoggerFactory? LoggerFactory { get; set; }
+
+    /// <summary>
+    /// Validates the configuration up front so a misconfiguration fails fast at startup with a clear,
+    /// option-naming error instead of a raw framework exception (or a silently degraded node) later. Called
+    /// by <see cref="RaftJobStorage.StartAsync"/> before the cluster is constructed.
+    /// </summary>
+    internal void Validate()
+    {
+        // Resolving the members also enforces the non-empty / Contains(Self) / parseable invariants.
+        var members = ClusterMembers;
+
+        if (SubmitTimeout <= TimeSpan.Zero)
+            throw new InvalidOperationException($"SubmitTimeout must be positive (was {SubmitTimeout}).");
+        if (LockLeaseTimeout <= TimeSpan.Zero)
+            throw new InvalidOperationException($"LockLeaseTimeout must be positive (was {LockLeaseTimeout}); it is divided by three to derive the lock renewal period.");
+        if (FetchInvisibilityTimeout <= TimeSpan.Zero)
+            throw new InvalidOperationException($"FetchInvisibilityTimeout must be positive (was {FetchInvisibilityTimeout}); it is divided by three to derive the fetch-lease renewal period.");
+        if (MaintenanceInterval <= TimeSpan.Zero)
+            throw new InvalidOperationException($"MaintenanceInterval must be positive (was {MaintenanceInterval}).");
+        if (LowerElectionTimeoutMs <= 0 || UpperElectionTimeoutMs <= 0 || LowerElectionTimeoutMs >= UpperElectionTimeoutMs)
+            throw new InvalidOperationException(
+                $"Election timeouts must satisfy 0 < LowerElectionTimeoutMs ({LowerElectionTimeoutMs}) < UpperElectionTimeoutMs ({UpperElectionTimeoutMs}).");
+        if (SnapshotInterval <= 0)
+            throw new InvalidOperationException(
+                $"SnapshotInterval must be positive (was {SnapshotInterval}); a non-positive value disables log compaction, so the write-ahead log would grow without bound and a lagging follower could never catch up via a snapshot.");
+
+        // Validate the derived forwarding port range for every member (including this node's own bind) so a
+        // too-large or negative RpcPortOffset fails here, naming the offset, rather than as a bare
+        // ArgumentOutOfRangeException from the listener bind or RpcEndpoint later.
+        foreach (var member in members) _ = RpcEndpoint(member, RpcPortOffset);
+    }
 
     internal EndPoint Self => ParseEndpoint(SelfEndpoint);
 
@@ -81,7 +121,10 @@ public sealed class RaftStorageOptions
         get
         {
             if (Members.Count == 0) throw new InvalidOperationException("RaftStorageOptions.Members must contain at least one endpoint.");
-            var result = Members.Select(ParseEndpoint).ToList();
+            // Deduplicate so a copy-paste duplicate cannot disagree with the seeded membership (DotNext's
+            // Add is idempotent, leaving one committed member) and so the single-node cold-start fast path
+            // keys off the true member count rather than the raw list length.
+            var result = Members.Select(ParseEndpoint).Distinct().ToList();
             if (!result.Contains(Self)) throw new InvalidOperationException($"RaftStorageOptions.Members must include SelfEndpoint ({SelfEndpoint}).");
             return result;
         }
@@ -105,15 +148,23 @@ public sealed class RaftStorageOptions
             throw new FormatException($"Endpoint '{endpoint}' must have the form host:port.");
 
         var host = endpoint[..idx];
-        if (!int.TryParse(endpoint[(idx + 1)..], out var port) || port is < 0 or > 65535)
-            throw new FormatException($"Endpoint '{endpoint}' has an invalid port; expected a number in 0-65535.");
+        // Reject port 0: it binds to an OS-assigned ephemeral port but is advertised verbatim as :0, so the
+        // node is unreachable for Raft and forwarding. A zero/unset port should fail loudly here.
+        if (!int.TryParse(endpoint[(idx + 1)..], out var port) || port is < 1 or > 65535)
+            throw new FormatException($"Endpoint '{endpoint}' has an invalid port; expected a number in 1-65535.");
 
         // An IPv6 literal must be bracketed so the colons in the address are not mistaken for the
         // host:port separator; a bare IPv6 literal is rejected rather than silently misparsed.
         if (host.StartsWith('[') && host.EndsWith(']'))
+        {
             host = host[1..^1];
+            if (host.Length == 0)
+                throw new FormatException($"Endpoint '{endpoint}' has an empty host.");
+        }
         else if (host.Contains(':'))
+        {
             throw new FormatException($"Endpoint '{endpoint}': an IPv6 literal must be bracketed, e.g. [::1]:{port}.");
+        }
 
         return IPAddress.TryParse(host, out var ip)
             ? new IPEndPoint(ip, port)
@@ -141,9 +192,9 @@ public sealed class RaftStorageOptions
         // Validate the combined port up front so a too-large RpcPortOffset fails with a message that
         // names the offset, rather than a bare ArgumentOutOfRangeException from the endpoint constructor.
         var rpcPort = PortOf(raftEndpoint) + offset;
-        if (rpcPort is < 0 or > 65535)
+        if (rpcPort is < 1 or > 65535)
             throw new InvalidOperationException(
-                $"Forwarding port {rpcPort} (Raft port {PortOf(raftEndpoint)} + RpcPortOffset {offset}) is outside the valid range 0-65535.");
+                $"Forwarding port {rpcPort} (Raft port {PortOf(raftEndpoint)} + RpcPortOffset {offset}) is outside the valid range 1-65535.");
 
         return raftEndpoint switch
         {

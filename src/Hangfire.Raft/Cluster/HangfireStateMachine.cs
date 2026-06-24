@@ -125,6 +125,11 @@ internal sealed class HangfireStateMachine : SimpleStateMachine
             var snapshot = await File.ReadAllBytesAsync(snapshotFile.FullName, token).ConfigureAwait(false);
             using var reader = new BinaryReader(new MemoryStream(snapshot, writable: false), Encoding.UTF8);
             Store.LoadSnapshot(reader);
+
+            // A restore-from-snapshot boot (or a follower installing a leader-pushed snapshot) is otherwise
+            // indistinguishable in the logs from a fresh empty start; record it so an operator can confirm
+            // how much state the node came up on.
+            _logger.LogInformation("Restored state-machine snapshot from {File} ({Bytes} bytes).", snapshotFile.FullName, snapshot.Length);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {

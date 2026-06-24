@@ -104,4 +104,61 @@ public class RaftStorageOptionsTests
         options.Members.Add("node2:5000");
         await Assert.That(options.ClusterMembers.Count).IsEqualTo(2);
     }
+
+    [Test]
+    public async Task ClusterMembers_Deduplicates_RepeatedEntries()
+    {
+        // A copy-paste duplicate must not inflate the member count: the seeded membership dedupes, and the
+        // single-node cold-start fast path keys off this count, so the two must agree.
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:5000" };
+        options.Members.Add("127.0.0.1:5000");
+        options.Members.Add("127.0.0.1:5000");
+        await Assert.That(options.ClusterMembers.Count).IsEqualTo(1);
+    }
+
+    [Test]
+    [Arguments("host:0")]   // port 0 binds an ephemeral port but is advertised as :0, so the node is unreachable
+    [Arguments("[]:5000")]  // empty bracketed host
+    public async Task ParseEndpoint_RejectsUnreachableForms(string endpoint)
+        => await Assert.That(() => RaftStorageOptions.ParseEndpoint(endpoint)).ThrowsExactly<FormatException>();
+
+    [Test]
+    public async Task Validate_Passes_ForADefaultSingleNodeConfig()
+    {
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:5000" };
+        options.Members.Add("127.0.0.1:5000");
+        await Assert.That(() => options.Validate()).ThrowsNothing();
+    }
+
+    [Test]
+    public async Task Validate_Rejects_InvertedElectionTimeouts()
+    {
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:5000", LowerElectionTimeoutMs = 3000, UpperElectionTimeoutMs = 1500 };
+        options.Members.Add("127.0.0.1:5000");
+        await Assert.That(options.Validate).ThrowsExactly<InvalidOperationException>().WithMessageContaining("ElectionTimeout");
+    }
+
+    [Test]
+    public async Task Validate_Rejects_NonPositiveSnapshotInterval()
+    {
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:5000", SnapshotInterval = 0 };
+        options.Members.Add("127.0.0.1:5000");
+        await Assert.That(options.Validate).ThrowsExactly<InvalidOperationException>().WithMessageContaining("SnapshotInterval");
+    }
+
+    [Test]
+    public async Task Validate_Rejects_NonPositiveLeaseTimeouts()
+    {
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:5000", FetchInvisibilityTimeout = TimeSpan.Zero };
+        options.Members.Add("127.0.0.1:5000");
+        await Assert.That(options.Validate).ThrowsExactly<InvalidOperationException>().WithMessageContaining("FetchInvisibilityTimeout");
+    }
+
+    [Test]
+    public async Task Validate_Rejects_RpcPortOffsetThatOverflowsThePortRange()
+    {
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:65000", RpcPortOffset = 1000 };
+        options.Members.Add("127.0.0.1:65000");
+        await Assert.That(options.Validate).ThrowsExactly<InvalidOperationException>().WithMessageContaining("RpcPortOffset");
+    }
 }

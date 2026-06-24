@@ -23,6 +23,7 @@ public sealed class RaftJobStorage : JobStorage, IAsyncDisposable
     public static async Task<RaftJobStorage> StartAsync(RaftStorageOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
         var cluster = await RaftStorageCluster.StartAsync(options, cancellationToken).ConfigureAwait(false);
         return new RaftJobStorage(cluster);
     }

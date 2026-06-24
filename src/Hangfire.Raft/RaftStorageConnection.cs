@@ -3,6 +3,7 @@ using Hangfire.Raft.Cluster;
 using Hangfire.Raft.Commands;
 using Hangfire.Server;
 using Hangfire.Storage;
+using Microsoft.Extensions.Logging;
 
 namespace Hangfire.Raft;
 
@@ -67,9 +68,22 @@ internal sealed class RaftStorageConnection(RaftJobStorage storage) : JobStorage
                 if (Cluster.HasLeader && Cluster.Store.HasQueuedJob(queues))
                 {
                     var token = Guid.NewGuid();
-                    var result = Cluster.Submit(Command.Single(new FetchOp(queues, token)), cancellationToken);
-                    if (result is FetchResult fetched)
-                        return new RaftFetchedJob(Cluster, token, fetched.JobId, fetched.Queue);
+                    try
+                    {
+                        var result = Cluster.Submit(Command.Single(new FetchOp(queues, token)), cancellationToken);
+                        if (result is FetchResult fetched)
+                            return new RaftFetchedJob(Cluster, token, fetched.JobId, fetched.Queue);
+                    }
+                    catch (RaftStorageException ex)
+                    {
+                        // The fetch outcome could not be confirmed (no leader by the time it ran, or an
+                        // ambiguous timeout). If it actually committed it dequeued a job into a lease this
+                        // worker never received, so that job is invisible until maintenance reclaims it after
+                        // the invisibility timeout. Log so the stall is correlatable, then fall through to the
+                        // wait and re-probe once the cluster is healthy again (rather than surfacing the
+                        // exception to the worker, matching how the loop already handles a missing leader).
+                        Cluster.Logger.LogWarning(ex, "A fetch from queue(s) [{Queues}] could not be confirmed; if it committed, the dequeued job becomes visible again only after the fetch invisibility timeout.", string.Join(", ", queues));
+                    }
                 }
             }
             finally
@@ -123,6 +137,11 @@ internal sealed class RaftStorageConnection(RaftJobStorage storage) : JobStorage
         }
         catch (JobLoadException ex)
         {
+            // A job whose invocation data no longer deserializes (the job type was removed/renamed, or there
+            // is a version skew between the enqueuing and executing deployments) can never run. The exception
+            // is surfaced to Hangfire via LoadException, but warn as well so the condition shows up in the
+            // operator's logs and not only when someone opens that specific job in the dashboard.
+            Cluster.Logger.LogWarning(ex, "Could not deserialize the invocation data for job {JobId}; its type may be missing or from an incompatible version, so it cannot be executed.", jobId);
             data.LoadException = ex;
         }
 
