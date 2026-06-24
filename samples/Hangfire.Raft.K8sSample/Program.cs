@@ -1,7 +1,7 @@
 // Kubernetes-ready ASP.NET host for Hangfire.Raft: a Hangfire server + dashboard on top of a Raft
 // cluster, no database. Each pod derives its stable identity from the StatefulSet pod name and the
 // headless service (see deploy/kubernetes/hangfire-raft.yaml). Run outside Kubernetes with a plain
-// `dotnet run` and it falls back to a durable single-node cluster on loopback.
+// `dotnet run` and it falls back to a development-only single-node cluster on loopback.
 //
 // Trigger endpoints (POST unless noted) let you exercise different job kinds against the cluster:
 //   /enqueue/{n}     n fire-and-forget jobs, each incrementing a replicated "executions" counter
@@ -112,7 +112,7 @@ static RaftStorageOptions BuildRaftOptions()
     const int raftPort = 5000;
     var pod = Environment.GetEnvironmentVariable("POD_NAME");
 
-    // Outside Kubernetes (plain `dotnet run`): a durable single-node cluster on loopback.
+    // Outside Kubernetes (plain `dotnet run`): a development-only single-node cluster on loopback.
     if (string.IsNullOrEmpty(pod))
     {
         var local = new RaftStorageOptions

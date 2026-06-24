@@ -16,11 +16,11 @@ namespace Hangfire.Raft.Tests;
 /// </summary>
 public class RaftJobStorageTests
 {
-    // The write-ahead log fsyncs on every commit (FlushInterval.Zero, for single-node durability). On a
-    // slow shared CI disk that contention can push co-located cluster tests past their election/submit
-    // deadlines, so CI points this at a tmpfs (HANGFIRE_RAFT_TEST_WAL_ROOT=/dev/shm) where fsync is
-    // near-free. Locally it falls back to the temp directory. This changes only where the bytes live, not
-    // any test semantics: a dispose+reopen restart still resumes from the same path.
+    // Each node keeps its own write-ahead log on disk and flushes it in the background. On a slow shared
+    // CI disk that fsync traffic, multiplied across co-located clusters, can push tests past their
+    // election/submit deadlines, so CI points this at a tmpfs (HANGFIRE_RAFT_TEST_WAL_ROOT=/dev/shm) where
+    // fsync is near-free. Locally it falls back to the temp directory. This changes only where the bytes
+    // live, not any test semantics: a dispose+reopen restart still resumes from the same path.
     private readonly string _walRoot = Path.Combine(
         Environment.GetEnvironmentVariable("HANGFIRE_RAFT_TEST_WAL_ROOT") is { Length: > 0 } root ? root : Path.GetTempPath(),
         "hangfire-raft-tests",
@@ -695,41 +695,6 @@ public class RaftJobStorageTests
             // The DNS member must round-trip as a DnsEndPoint, not collapse to a resolved IP address.
             await Assert.That(config.Members).Contains(m => m is DnsEndPoint { Host: "node1.local", Port: 6000 });
         }
-    }
-
-    [Test]
-    [RetryWithDelay(3, 500)]
-    public async Task AcknowledgedWrite_SurvivesACrash_WithoutAnyBackgroundFlush()
-    {
-        // With FlushInterval.Infinite the background flusher is off, so the ONLY thing that persists a
-        // write is the flush SubmitAsync performs before acknowledging it. Disposing the node performs no
-        // flush (and neither would a real crash), so finding every acknowledged job after a restart proves
-        // durability comes solely from that flush-before-ack: drop it and the checkpoint never advances, so
-        // the restart replays nothing and the jobs are gone.
-        var port = AllocatePortPairs(1)[0];
-        var walPath = Path.Combine(_walRoot, "crash-durability");
-
-        var jobIds = new List<string>();
-        var first = await StartNode(port, [port], walPath, configure: o => o.FlushInterval = Timeout.InfiniteTimeSpan);
-        using (var connection = (JobStorageConnection)first.GetConnection())
-        {
-            // Several writes, so the assertion is about the whole acknowledged tail, not a lucky single entry.
-            for (var i = 0; i < 5; i++)
-                jobIds.Add(connection.CreateExpiredJob(Job.FromExpression(() => TestJobs.Run("durable")), new Dictionary<string, string>(), DateTime.UtcNow, TimeSpan.FromDays(1)));
-        }
-
-        // Terminate without a graceful flush, mimicking a process crash.
-        await first.DisposeAsync();
-        _storages.Remove(first);
-
-        var second = await StartNode(port, [port], walPath, configure: o => o.FlushInterval = Timeout.InfiniteTimeSpan);
-        using var restarted = (JobStorageConnection)second.GetConnection();
-        // Infinite-flush makes the restart's tail replay synchronous (slower), and rebinding the same port
-        // can hit a brief re-election delay, so allow a wider budget than the default before the restarted
-        // node is caught up.
-        await PollUntil(() => jobIds.All(id => restarted.GetJobData(id) is not null), "every acknowledged write is durable after a crash", timeoutSeconds: 30);
-        foreach (var id in jobIds)
-            await Assert.That(restarted.GetJobData(id)).IsNotNull();
     }
 
     [Test]

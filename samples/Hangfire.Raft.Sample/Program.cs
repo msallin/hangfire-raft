@@ -1,6 +1,6 @@
 // Demo for Hangfire.Raft: runs a Hangfire server on top of a Raft cluster, no database.
 //
-//   dotnet run                  single-node cluster (still durable via the write-ahead log)
+//   dotnet run                  single-node cluster (development only: no fault tolerance)
 //   dotnet run -- 0             node 0 of a three-node cluster on localhost
 //   dotnet run -- 1             node 1 (run each node in its own terminal)
 //   dotnet run -- 2             node 2
