@@ -15,7 +15,9 @@ public sealed class RaftStorageOptions
 
     /// <summary>
     /// Raft endpoints of all cluster members, including this node. Must be identical on every node.
-    /// A single entry creates a single-node cluster (still durable through the write-ahead log).
+    /// Use an odd number of nodes (3 or 5) in production so a committed write survives a node crash:
+    /// durability comes from quorum replication, not from any single node's disk. A single entry forms a
+    /// one-node "cluster" with no fault tolerance, suitable only for local development and tests.
     /// </summary>
     public IList<string> Members { get; } = new List<string>();
 
@@ -51,15 +53,17 @@ public sealed class RaftStorageOptions
     public int SnapshotInterval { get; set; } = 4096;
 
     /// <summary>
-    /// How the write-ahead log flushes committed entries to disk. <see cref="TimeSpan.Zero"/> (the
-    /// default) runs a background flusher that persists on every commit; on top of that every
-    /// acknowledged write waits for its own entry to be flushed before returning, so an acked write is
-    /// durable across a crash. Internal because production should keep the default: tests set
-    /// <see cref="Timeout.InfiniteTimeSpan"/> to disable the background flusher and make the per-write
-    /// flush the sole durability mechanism, which deterministically proves an acked write survives a
-    /// termination that performs no background flush.
+    /// How the write-ahead log persists committed entries to this node's local disk. Durability does not
+    /// depend on this: a committed entry is held by a majority of nodes, and a node that restarts recovers
+    /// any not-yet-flushed tail from the current leader. <see cref="TimeSpan.Zero"/> (the default) flushes
+    /// eagerly in the background as each entry commits, which keeps the node's on-disk copy current without
+    /// blocking the writer. A positive value batches commits into one fsync per interval (higher write
+    /// throughput, but a crash can lose up to that interval of locally-unflushed entries, which a
+    /// multi-node cluster re-replicates from the quorum on restart). <see cref="Timeout.InfiniteTimeSpan"/>
+    /// disables background flushing entirely: this node then never persists committed entries to disk on its
+    /// own, so after a restart it recovers everything past its last snapshot from the quorum.
     /// </summary>
-    internal TimeSpan FlushInterval { get; set; } = TimeSpan.Zero;
+    public TimeSpan FlushInterval { get; set; } = TimeSpan.Zero;
 
     /// <summary>Raft election timeout lower bound in milliseconds.</summary>
     public int LowerElectionTimeoutMs { get; set; } = 1500;

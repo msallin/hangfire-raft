@@ -5,11 +5,12 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/msallin/hangfire-raft/blob/main/LICENSE)
 
 Hangfire job storage backed by a [DotNext](https://github.com/dotnet/dotNext) Raft cluster.
-Job state lives in replicated memory; durability comes from a per-node write-ahead log and
-snapshots on local disk. No SQL Server, no Redis, no external database.
+Job state lives in replicated memory; durability comes from quorum replication, backed by a
+per-node write-ahead log and snapshots on local disk. No SQL Server, no Redis, no external database.
 
 Each application node is simultaneously a Hangfire client/server and a Raft cluster member.
-A cluster of one works too and still survives restarts through the WAL.
+Run an odd number of nodes (3 or 5) in production. A single node works for development and survives
+graceful restarts through the WAL, but has no fault tolerance and is not a production configuration.
 
 ## Quick start
 
@@ -77,14 +78,16 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
   submitter's UTC timestamp, so every replica applies the same updates and converges to the
   same logical state (snapshot byte streams may differ in map ordering; the replicated data does
   not). Keep node clocks reasonably synchronized (NTP) because expirations compare those timestamps.
-* **Durability**: a write is flushed to the submitting node's write-ahead log on `WalPath` before
-  it is acknowledged, so an acknowledged write survives a crash of that node; the log is
-  periodically compacted into snapshots, and on restart a node replays snapshot + log before
-  serving, then catches up from the leader. On a multi-node cluster the synchronous flush covers
-  the node that handled the write, while its peers persist the entry through a background flush a
-  moment later, so a simultaneous crash of the whole committing majority before that background
-  flush (for example a single-rack power loss) can still lose a just-committed entry — spread
-  members across failure domains.
+* **Durability**: a write is acknowledged once it is committed (replicated to a majority) and
+  applied locally, so it survives any single node failing — the surviving quorum still holds it, and
+  a node that crashed recovers the entry from the leader when it restarts. Each node also persists
+  committed entries to its own write-ahead log on `WalPath` (flushed eagerly in the background as
+  entries commit) and compacts the log into snapshots; on restart a node replays snapshot + log,
+  then catches up from the leader. Because acknowledgement waits for in-memory quorum rather than an
+  fsync on every node, a simultaneous crash of the whole committing majority before any of them
+  flushes (for example a single-rack power loss) can still lose a just-committed entry — run an odd
+  number of nodes and spread them across failure domains. A single node has no quorum to fall back
+  on, so it is a development-only configuration.
 * **Maintenance**: the current leader periodically evicts expired jobs/sets/hashes/lists/
   counters, drops expired lock leases and requeues stale fetches.
 
@@ -101,6 +104,7 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
 | `FetchInvisibilityTimeout` | 5 min | A crashed worker's job becomes fetchable again on the first maintenance pass after this (so up to `+ MaintenanceInterval`, and only with quorum). |
 | `MaintenanceInterval` | 30 s | Leader cleanup cadence. |
 | `SnapshotInterval` | 4096 | Applied log entries between state-machine snapshots; the log compacts up to each snapshot. A tuning/testing knob. |
+| `FlushInterval` | 0 | How the WAL persists committed entries to local disk. `0` (default) flushes eagerly in the background as entries commit; a positive value batches into one fsync per interval (more throughput, but a crash loses up to that interval locally, re-replicated from the quorum). Durability comes from quorum, not this flush. |
 | `LowerElectionTimeoutMs` / `UpperElectionTimeoutMs` | 1500 / 3000 | Raft election timeouts. |
 | `LoggerFactory` | none | Diagnostics for the cluster and storage. |
 
@@ -117,7 +121,8 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
   comfortable for typical background-job workloads (hundreds of writes/second on a LAN), but
   it is not a Redis replacement for six-figure jobs-per-minute setups.
 * Hangfire's storage API is synchronous, so each write blocks a worker thread while the cluster
-  replicates, applies and flushes it on the thread pool. Under many concurrent workers, raise the
+  replicates and applies it on the thread pool (the local flush happens in the background, off the
+  acknowledgement path). Under many concurrent workers, raise the
   thread-pool floor (`ThreadPool.SetMinThreads`) so those continuations are not starved and a write
   does not stall to `SubmitTimeout`; the default floor grows by only ~1 thread/second.
 * Job execution is **at-least-once**, like other Hangfire storages: a worker that dies after
