@@ -16,7 +16,7 @@
     <!-- The TUnit meta-package brings the engine, the assertion library and the MTP extensions
          (TRX report, code coverage) in one reference. Microsoft.NET.Test.Sdk must NOT be added:
          it pulls in the legacy VSTest host and breaks TUnit's test discovery. -->
-    <PackageReference Include="TUnit" Version="1.57.0" />
+    <PackageReference Include="TUnit" Version="1.63.0" />
   </ItemGroup>
 
   <ItemGroup>
