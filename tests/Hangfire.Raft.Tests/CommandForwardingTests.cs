@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using DotNext.Net.Cluster.Consensus.Raft;
 using Hangfire.Raft.Cluster;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -136,10 +137,16 @@ public class CommandForwardingTests
         await Assert.That(RaftStorageCluster.IsRetryable(new NotLeaderResponseException())).IsTrue();
         await Assert.That(RaftStorageCluster.IsRetryable(new RetryableForwardingException("x", new IOException()))).IsTrue();
         await Assert.That(RaftStorageCluster.IsRetryable(new TimeoutException())).IsTrue();
+        // DotNext's leadership pre-check (before the append) throws without an inner exception.
+        await Assert.That(RaftStorageCluster.IsRetryable(new NotLeaderException())).IsTrue();
 
         // An ambiguous outcome must NEVER be retried: a second committed copy of a non-idempotent op
         // (e.g. a fetch) could lose a job. Unrelated failures are not blindly retried either.
         await Assert.That(RaftStorageCluster.IsRetryable(new AmbiguousCommandException("x"))).IsFalse();
+        // Leadership lost AFTER the append (DotNext wraps the leader-state cancellation/disposal): the entry
+        // may still commit under the next leader, so this is ambiguous, not retryable.
+        await Assert.That(RaftStorageCluster.IsRetryable(new NotLeaderException(new OperationCanceledException()))).IsFalse();
+        await Assert.That(RaftStorageCluster.IsRetryable(new NotLeaderException(new ObjectDisposedException("leader")))).IsFalse();
         await Assert.That(RaftStorageCluster.IsRetryable(new InvalidOperationException())).IsFalse();
         await Assert.That(RaftStorageCluster.IsRetryable(new RaftStorageException("x"))).IsFalse();
     }

@@ -47,13 +47,19 @@ internal sealed class RaftStorageConnection(RaftJobStorage storage) : JobStorage
     {
         if (queues is null || queues.Length == 0) throw new ArgumentException("At least one queue is required.", nameof(queues));
 
+        Task? enqueued = null;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             // Capture the wait BEFORE probing, so an enqueue that lands between the probe and the
-            // wait still pulses this task instead of being lost.
-            var enqueued = Cluster.Signals.WaitForQueues(queues);
+            // wait still pulses this task instead of being lost. A still-pending wait from the previous
+            // iteration was captured even earlier, so it is reused: each WaitForQueues call parks a
+            // Task.WhenAny continuation on every queue's pulse source until one of them pulses, so
+            // re-capturing on every idle 1s poll would grow memory without bound on a queue that never
+            // receives work.
+            if (enqueued is null || enqueued.IsCompleted)
+                enqueued = Cluster.Signals.WaitForQueues(queues);
 
             // Probe and fetch under the per-node gate so a single enqueue does not fan out into one
             // consensus round per idle worker. The probe must be inside the gate: once the winner

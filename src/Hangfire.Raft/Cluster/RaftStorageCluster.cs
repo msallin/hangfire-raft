@@ -379,15 +379,24 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
 
     /// <summary>
     /// Failures where the command provably never reached the leader's log, so resending is safe.
-    /// DotNext's <see cref="NotLeaderException"/> is thrown by the leadership pre-check before any
-    /// append; <see cref="TimeoutException"/> comes from WaitForLeaderAsync. Matched explicitly
-    /// rather than via their <c>InvalidOperationException</c> base so that other IOE-shaped failures
-    /// (e.g. ObjectDisposedException during shutdown) are not silently retried for the full timeout.
+    /// <see cref="TimeoutException"/> comes from WaitForLeaderAsync. Matched explicitly rather than via
+    /// their <c>InvalidOperationException</c> base so that other IOE-shaped failures (e.g.
+    /// ObjectDisposedException during shutdown) are not silently retried for the full timeout.
     /// </summary>
     internal static bool IsRetryable(Exception ex) => ex is NotLeaderResponseException
         or RetryableForwardingException
-        or NotLeaderException
-        or TimeoutException;
+        or TimeoutException
+        || IsNotLeaderBeforeAppend(ex);
+
+    /// <summary>
+    /// DotNext's ReplicateAsync throws <see cref="NotLeaderException"/> from two places: the leadership
+    /// pre-check, which runs before the append and carries no inner exception, and after the append when
+    /// leadership is lost while waiting for the commit (the leader state's cancellation or disposal is
+    /// wrapped as the inner exception). Only the first is provably not in the log. The second may already be
+    /// replicated and still commit under the next leader, so resending it could apply a non-idempotent op
+    /// (a fetch, a counter increment) twice; it must be treated as ambiguous.
+    /// </summary>
+    internal static bool IsNotLeaderBeforeAppend(Exception ex) => ex is NotLeaderException { InnerException: null };
 
     private async Task<(byte Status, string? Message)> HandleForwardedCommand(ReadOnlyMemory<byte> payload, CancellationToken token)
     {
@@ -421,10 +430,11 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             await cluster.ReplicateAsync(payload, null, deadline.Token).ConfigureAwait(false);
             return (ForwardingProtocol.StatusOk, null);
         }
-        catch (NotLeaderException)
+        catch (NotLeaderException ex) when (IsNotLeaderBeforeAppend(ex))
         {
             // Leadership was lost before the entry was appended: safe for the submitter to re-resolve
-            // the new leader and retry, so this is NotLeader, not an ambiguous outcome.
+            // the new leader and retry, so this is NotLeader, not an ambiguous outcome. A NotLeaderException
+            // raised after the append falls through to the ambiguous branch below.
             return (ForwardingProtocol.StatusNotLeader, null);
         }
         catch (Exception)

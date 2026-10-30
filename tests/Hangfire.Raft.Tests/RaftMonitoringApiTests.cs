@@ -158,6 +158,23 @@ public class RaftMonitoringApiTests
         await Assert.That(_api.ScheduledCount()).IsEqualTo(3);
     }
 
+    [Test]
+    public async Task ScheduledJobs_ResolvesQueueQualifiedScheduleEntries()
+    {
+        // Hangfire's ScheduledState stores a job with an explicit queue as "{queue}:{jobId}" in the set.
+        CreateJob("plain");
+        Apply(new SetJobStateOp("plain", State(ScheduledState.StateName, T0)));
+        Apply(new AddToSetOp("schedule", "plain", 100d));
+        CreateJob("queued");
+        Apply(new SetJobStateOp("queued", State(ScheduledState.StateName, T0)));
+        Apply(new AddToSetOp("schedule", "critical:queued", 200d));
+
+        var page = _api.ScheduledJobs(0, 10);
+        await Assert.That(page.Select(kv => kv.Key)).IsEquivalentTo(["plain", "queued"], CollectionOrdering.Matching);
+        await Assert.That(page[1].Value.InScheduledState).IsTrue();
+        await Assert.That(_api.ScheduledCount()).IsEqualTo(2);
+    }
+
     // ----- succeeded page (duration math + timestamp fallback) -----
 
     [Test]
