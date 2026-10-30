@@ -214,8 +214,10 @@ internal sealed class RaftMonitoringApi(RaftStore store) : JobStorageMonitor
         {
             Job = TryDeserializeJob(job.InvocationData, out _),
             AwaitingAt = job.CurrentState?.CreatedAt,
-            ParentStateName = data.GetValueOrDefault("NextState") is { } nextState
-                ? ParseStateName(nextState)
+            // The dashboard's "Parent" column shows the parent job's current state (Hangfire's own fallback
+            // reads GetStateData(ParentId).Name), not the continuation's NextState.
+            ParentStateName = data.GetValueOrDefault("ParentId") is { } parentId
+                ? Store.GetJob(parentId)?.CurrentState?.Name
                 : null,
             StateData = data,
         });
@@ -346,18 +348,4 @@ internal sealed class RaftMonitoringApi(RaftStore store) : JobStorageMonitor
 
     private static long ParseLong(Dictionary<string, string> data, string key)
         => data.TryGetValue(key, out var value) && long.TryParse(value, out var result) ? result : 0;
-
-    /// <summary>
-    /// Extracts the state name from an awaiting continuation's serialized NextState JSON.
-    /// Input:  {"$type":"...","Name":"Enqueued",...} -> "Enqueued"; unparseable input -> null.
-    /// </summary>
-    internal static string? ParseStateName(string nextStateJson)
-    {
-        const string marker = "\"Name\":\"";
-        var start = nextStateJson.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-        if (start < 0) return null;
-        start += marker.Length;
-        var end = nextStateJson.IndexOf('"', start);
-        return end > start ? nextStateJson[start..end] : null;
-    }
 }

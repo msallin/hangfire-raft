@@ -121,14 +121,11 @@ internal sealed partial class RaftStore
                 {
                     // Always drop the lease; re-enqueue only if the job still exists. Maintenance never
                     // evicts a job while it is fetched, so this existence guard is defensive (it matches
-                    // the stale-fetch reclaim in RunMaintenance).
-                    if (_fetched.Remove(o.FetchToken, out var fetched) && _jobs.TryGetValue(fetched.JobId, out var job))
+                    // the stale-fetch reclaim in RunMaintenance). The job's expiry is left alone: Hangfire
+                    // only expires a job together with a final state (and persists it on any other state), so
+                    // an expiring job is not runnable and its queue entry is dropped along with it on eviction.
+                    if (_fetched.Remove(o.FetchToken, out var fetched) && _jobs.ContainsKey(fetched.JobId))
                     {
-                        // A re-enqueued job is runnable again, so clear any pending expiry. Without this, a job
-                        // whose ExpireAt already elapsed while it was fetched (an ExpireJob that raced the fetch)
-                        // would be put back on the queue only to be evicted by the next maintenance pass with
-                        // zero executions. ExpireAt is not part of the state index, so clearing it here is safe.
-                        job.ExpireAt = null;
                         Queue(fetched.Queue).AddFirst(fetched.JobId);
                         effects.SignalQueue(fetched.Queue);
                     }
@@ -272,7 +269,9 @@ internal sealed partial class RaftStore
                 }
             case RemoveTimedOutServersOp o:
                 {
-                    var cutoff = now - o.Timeout;
+                    // Saturate rather than throw on a timeout reaching back past DateTime.MinValue: a throwing
+                    // handler would fault every replica on this committed entry (and again on every replay).
+                    var cutoff = o.Timeout >= now - DateTime.MinValue ? DateTime.MinValue : now - o.Timeout;
                     var timedOut = _servers.Where(kv => kv.Value.LastHeartbeat < cutoff).Select(kv => kv.Key).ToList();
                     foreach (var id in timedOut) _servers.Remove(id);
                     return timedOut.Count;
@@ -380,15 +379,14 @@ internal sealed partial class RaftStore
         foreach (var (token, fetched) in stale)
         {
             _fetched.Remove(token);
-            if (_jobs.TryGetValue(fetched.JobId, out var job))
+            if (_jobs.ContainsKey(fetched.JobId))
             {
                 // The lease is being reclaimed because no worker renewed it (a crashed/partitioned worker,
-                // or one that stalled past the invisibility timeout); the job is about to run again. Clear
-                // any pending expiry so the re-enqueued job is not evicted by the NEXT maintenance pass: it
-                // is no longer in fetchedJobIds, so without this an expired-while-fetched job would be lost
-                // here with zero executions. Each reclaim means a possible duplicate run, surfaced by the
-                // leader as a warning + metric (see RaftStorageCluster.MaintenanceLoop).
-                job.ExpireAt = null;
+                // or one that stalled past the invisibility timeout); the job is about to run again. Each
+                // reclaim means a possible duplicate run, surfaced by the leader as a warning + metric (see
+                // RaftStorageCluster.MaintenanceLoop). The expiry is kept, as in RequeueFetchedOp: a job with
+                // one is in a final state (e.g. a worker that committed Succeeded and died before its ack), so
+                // clearing it would keep that finished job forever instead of letting it expire.
                 Queue(fetched.Queue).AddFirst(fetched.JobId);
                 effects.SignalQueue(fetched.Queue);
                 staleReclaimed++;

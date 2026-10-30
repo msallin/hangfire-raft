@@ -209,28 +209,32 @@ public class RaftMonitoringApiTests
         await Assert.That(_api.FetchedCount("q")).IsEqualTo(1);
     }
 
-    // ----- awaiting page (continuation parent-state scraping) -----
+    // ----- awaiting page (parent job's current state) -----
 
     [Test]
-    public async Task AwaitingJobs_ExtractsParentStateName()
+    public async Task AwaitingJobs_ReportsTheParentJobsCurrentState()
     {
+        CreateJob("parent");
+        Apply(new SetJobStateOp("parent", State(ProcessingState.StateName, T0)));
         CreateJob("w");
         Apply(new SetJobStateOp("w", State(AwaitingState.StateName, T0,
+            ("ParentId", "parent"),
             ("NextState", "{\"$type\":\"...\",\"Name\":\"Enqueued\"}"))));
 
         var dto = (await Assert.That(_api.AwaitingJobs(0, 10)).HasSingleItem()).Value;
-        await Assert.That(dto.ParentStateName).IsEqualTo("Enqueued");
+        await Assert.That(dto.ParentStateName).IsEqualTo(ProcessingState.StateName); // the parent's state, not NextState
         await Assert.That(_api.AwaitingCount()).IsEqualTo(1);
     }
 
     [Test]
-    [Arguments("{\"$type\":\"x\",\"Name\":\"Enqueued\"}", "Enqueued")]
-    [Arguments("{\"name\":\"Scheduled\"}", "Scheduled")] // marker match is case-insensitive
-    [Arguments("no marker", null)]
-    [Arguments("{\"Name\":\"unterminated", null)]
-    [Arguments("", null)]
-    public async Task ParseStateName_Cases(string json, string? expected)
-        => await Assert.That(RaftMonitoringApi.ParseStateName(json)).IsEqualTo(expected);
+    public async Task AwaitingJobs_ParentStateIsNull_WhenTheParentIsGone()
+    {
+        CreateJob("w");
+        Apply(new SetJobStateOp("w", State(AwaitingState.StateName, T0, ("ParentId", "evicted"))));
+
+        var dto = (await Assert.That(_api.AwaitingJobs(0, 10)).HasSingleItem()).Value;
+        await Assert.That(dto.ParentStateName).IsNull();
+    }
 
     // ----- date-bucket graphs -----
 

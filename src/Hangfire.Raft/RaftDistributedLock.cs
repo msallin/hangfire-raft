@@ -43,23 +43,43 @@ internal sealed class RaftDistributedLock : IDisposable
     public static RaftDistributedLock Acquire(RaftStorageCluster cluster, string resource, TimeSpan timeout)
     {
         var owner = Guid.NewGuid();
-        var deadline = DateTime.UtcNow + timeout;
+        var deadline = Deadline(DateTime.UtcNow, timeout);
 
-        while (true)
+        for (var attempt = 0; ; attempt++)
         {
-            // Check the deadline before each attempt (not only after) so an expired timeout fails fast
+            // Check the deadline before each retry (not only after) so an expired timeout fails fast
             // instead of paying for one more submit, and bound the attempt itself by the time left so a
             // short timeout is honored during an outage rather than blocking for the full SubmitTimeout.
+            // The first attempt is always made, even with a zero timeout: like SQL Server's sp_getapplock
+            // with a zero timeout, a non-blocking acquire of a free lock must succeed. Without a budget of its
+            // own it is bounded by SubmitTimeout like any other write.
             var remaining = deadline - DateTime.UtcNow;
-            if (remaining <= TimeSpan.Zero) throw new DistributedLockTimeoutException(resource);
+            if (remaining <= TimeSpan.Zero)
+            {
+                if (attempt > 0) throw new DistributedLockTimeoutException(resource);
+                remaining = cluster.Options.SubmitTimeout;
+            }
 
             var released = cluster.Signals.LockReleased; // capture before the attempt to avoid missing a release
             if (TryAcquireOnce(cluster, resource, owner, remaining))
                 return new RaftDistributedLock(cluster, resource, owner);
 
-            var wait = remaining < TimeSpan.FromMilliseconds(200) ? remaining : TimeSpan.FromMilliseconds(200);
-            released.Wait(wait);
+            remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero) throw new DistributedLockTimeoutException(resource);
+            released.Wait(remaining < TimeSpan.FromMilliseconds(200) ? remaining : TimeSpan.FromMilliseconds(200));
         }
+    }
+
+    /// <summary>
+    /// Absolute deadline for a lock wait. <see cref="Timeout.InfiniteTimeSpan"/> waits forever, a timeout too
+    /// large to add saturates instead of overflowing, and any other non-positive timeout means a single attempt.
+    /// Input: (now, 5s) -> now + 5s; (now, Infinite) -> MaxValue; (now, TimeSpan.MaxValue) -> MaxValue; (now, 0) -> now.
+    /// </summary>
+    internal static DateTime Deadline(DateTime now, TimeSpan timeout)
+    {
+        if (timeout == Timeout.InfiniteTimeSpan) return DateTime.MaxValue;
+        if (timeout <= TimeSpan.Zero) return now;
+        return timeout >= DateTime.MaxValue - now ? DateTime.MaxValue : now + timeout;
     }
 
     private static bool TryAcquireOnce(RaftStorageCluster cluster, string resource, Guid owner, TimeSpan remaining)
@@ -68,21 +88,43 @@ internal sealed class RaftDistributedLock : IDisposable
 
         // When the remaining budget is at least a full submit timeout, the submit's own timeout already
         // bounds the attempt, so submit unbounded. Otherwise cap the attempt at the remaining budget so
-        // the caller's short timeout is respected even while the cluster is unavailable. A submit that
-        // never reaches a leader is not appended, so cancelling it cannot leave a half-applied lock; the
-        // narrow case where the entry was appended just before the cancel resolves itself once the lease
-        // expires.
-        if (remaining >= cluster.Options.SubmitTimeout)
-            return (bool)cluster.Submit(op)!;
-
-        using var attempt = new CancellationTokenSource(remaining);
+        // the caller's short timeout is respected even while the cluster is unavailable.
         try
         {
-            return (bool)cluster.Submit(op, attempt.Token)!;
+            if (remaining >= cluster.Options.SubmitTimeout)
+                return (bool)cluster.Submit(op)!;
+
+            using var attempt = new CancellationTokenSource(remaining);
+            try
+            {
+                return (bool)cluster.Submit(op, attempt.Token)!;
+            }
+            catch (OperationCanceledException)
+            {
+                throw new DistributedLockTimeoutException(resource);
+            }
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (ex is DistributedLockTimeoutException or RaftStorageException)
         {
-            throw new DistributedLockTimeoutException(resource);
+            // The attempt may have been handed to the cluster and still commit (an ambiguous timeout, or a
+            // cancel that landed after the append), which would leave the lock held by an owner that nobody
+            // renews or releases until its lease expires, stalling every other acquirer. The release is
+            // owner-scoped, so it is a no-op if nothing was acquired. Best effort: it can still lose a race
+            // with an acquire that is in flight at this moment, which then resolves at lease expiry.
+            _ = ReleaseAbandonedAsync(cluster, resource, owner);
+            throw;
+        }
+    }
+
+    private static async Task ReleaseAbandonedAsync(RaftStorageCluster cluster, string resource, Guid owner)
+    {
+        try
+        {
+            await cluster.SubmitAsync(Command.Single(new ReleaseLockOp(resource, owner))).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            cluster.Logger.LogDebug(ex, "Could not release the abandoned acquire attempt for lock '{Resource}'; its lease expiry frees it.", resource);
         }
     }
 

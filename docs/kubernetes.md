@@ -146,7 +146,7 @@ resolves lazily and re-resolves on every reconnect.
   `/ready` returns 200 only when the node knows a leader — so it can submit or forward writes — and 503
   otherwise; the `readinessProbe` points at it, so a leaderless node is pulled from the Service.
   `/health` returns 503 only when the state machine has **faulted** (a committed entry that will not
-  apply, or an unreadable snapshot); the `livenessProbe` points at it, so a faulted node is recycled
+  apply, an unreadable snapshot, or a snapshot write that failed, e.g. on a full disk); the `livenessProbe` points at it, so a faulted node is recycled
   instead of lingering as a dead quorum member. A `startupProbe` on `/health` gates both until the node
   finishes WAL replay / snapshot restore on start (it restores state before binding the HTTP listener),
   so a slow-but-healthy restart is not killed mid-replay — widen its `failureThreshold` for a large log.

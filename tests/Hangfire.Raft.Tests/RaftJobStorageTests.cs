@@ -229,6 +229,58 @@ public class RaftJobStorageTests
 
     [Test]
     [RetryWithDelay(3, 500)]
+    public async Task DistributedLock_ZeroTimeout_MakesOneNonBlockingAttempt()
+    {
+        // Like sp_getapplock with a zero timeout (e.g. [DisableConcurrentExecution(0)]): a free lock is
+        // acquired, a held one fails immediately instead of waiting.
+        var storage = await StartSingleNode();
+        await PollUntil(() => storage.GetHealth().HasLeader, "the node elects itself leader");
+        using var connection1 = (JobStorageConnection)storage.GetConnection();
+        using var connection2 = (JobStorageConnection)storage.GetConnection();
+
+        var handle = connection1.AcquireDistributedLock("locks:zero", TimeSpan.Zero);
+        await Assert.That(handle).IsNotNull();
+        await Assert.That(() => connection2.AcquireDistributedLock("locks:zero", TimeSpan.Zero)).ThrowsExactly<DistributedLockTimeoutException>();
+        handle.Dispose();
+    }
+
+    [Test]
+    [RetryWithDelay(3, 500)]
+    public async Task GetHealth_ReportsFaulted_WhenASnapshotWriteFails()
+    {
+        // A failed snapshot write is rethrown by DotNext on the next apply, before our ApplyAsync runs, and
+        // then latched in the WAL: the node can no longer apply anything. It must be reported as faulted and
+        // fail writes fast instead of reporting healthy while every write times out as "ambiguous".
+        var port = AllocatePortPairs(1)[0];
+        var walPath = Path.Combine(_walRoot, port.ToString());
+        var storage = await StartNode(port, [port], walPath, snapshotInterval: 4, configure: o => o.SubmitTimeout = TimeSpan.FromSeconds(3));
+        await PollUntil(() => storage.GetHealth().HasLeader, "the node elects itself leader");
+        using var connection = storage.GetConnection();
+
+        // Make every further snapshot write fail: the snapshot directory becomes a plain file.
+        var stateDirectory = Path.Combine(walPath, "state");
+        Directory.Delete(stateDirectory, recursive: true);
+        await File.WriteAllTextAsync(stateDirectory, "");
+
+        for (var i = 0; i < 12 && !storage.GetHealth().Faulted; i++)
+        {
+            try
+            {
+                connection.SetRangeInHash("h", [new("f", i.ToString())]);
+            }
+            catch (RaftStorageException)
+            {
+                // the write that runs into the failed snapshot cannot be applied
+            }
+        }
+
+        await Assert.That(storage.GetHealth().Faulted).IsTrue();
+        await Assert.That(() => connection.SetRangeInHash("h", [new("f", "x")]))
+            .ThrowsExactly<RaftStorageException>().WithMessageContaining("faulted");
+    }
+
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task DistributedLock_AfterRenewalsThenDispose_IsImmediatelyReacquirable()
     {
         // Short lease so the background renewal fires several times during the hold; this exercises
