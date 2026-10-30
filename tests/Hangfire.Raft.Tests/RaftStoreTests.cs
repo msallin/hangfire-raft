@@ -709,46 +709,47 @@ public class RaftStoreTests
     }
 
     [Test]
-    public async Task Maintenance_DoesNotLose_AReclaimedExpiredJob_OnTheNextPass()
+    public async Task Maintenance_Reclaim_KeepsTheExpiry_OfAFinishedJob()
     {
-        // A job whose expiry elapsed while it was held under a fetch lease (an ExpireJob that raced the
-        // fetch) is protected while the lease is live. Once the lease goes stale and is reclaimed the job is
-        // re-enqueued to run again; the reclaim must clear its expiry, otherwise the NEXT maintenance pass --
-        // where the job is no longer fetch-protected -- would evict it with zero executions and strip it from
-        // the queue. This is the cross-pass silent-loss regression.
+        // Hangfire only expires a job together with a final state. A worker that committed Succeeded (+ expiry)
+        // and died before its ack leaves a stale lease; the reclaim re-enqueues the job (the next worker rejects
+        // it by state and acks) but must keep its expiry, otherwise the finished job would never be evicted.
         Apply(T0, NewJob("a"), new EnqueueOp("q", "a"));
         var token = Guid.NewGuid();
         Apply(T0, new FetchOp(["q"], token));
-        Apply(T0, new ExpireJobOp("a", T0.AddMinutes(1)));
+        Apply(T0, new SetJobStateOp("a", State("Succeeded", T0)), new ExpireJobOp("a", T0.AddMinutes(1)));
 
-        // Pass 1: the lease is stale (10min elapsed > 5min invisibility), so the job is reclaimed, re-enqueued
-        // and its expiry cleared. It is reported in the summary so the leader can warn about the possible re-run.
+        // Pass 1: the lease is stale (10min elapsed > 5min invisibility), so the job is reclaimed and
+        // re-enqueued with its expiry intact. It is reported so the leader can warn about the possible re-run.
         var summary = (MaintenanceSummary)Apply(T0.AddMinutes(10), new MaintenanceOp(TimeSpan.FromMinutes(5)))!;
         await Assert.That(summary.StaleFetchesReclaimed).IsEqualTo(1);
-        await Assert.That(_store.GetJob("a")!.ExpireAt).IsNull();
+        await Assert.That(_store.GetJob("a")!.ExpireAt).IsEqualTo(T0.AddMinutes(1));
         await Assert.That(_store.GetQueueLength("q")).IsEqualTo(1);
 
-        // Pass 2: the job is no longer fetch-protected. With expiry cleared on reclaim it survives; without
-        // the fix it would be evicted here and dropped from the queue.
-        Apply(T0.AddMinutes(20), new MaintenanceOp(TimeSpan.FromMinutes(5)));
-        await Assert.That(_store.GetJob("a")).IsNotNull();
-        await Assert.That(_store.GetQueueLength("q")).IsEqualTo(1);
+        // Pass 2: no longer fetch-protected, so the expired job is evicted along with its queue entry.
+        summary = (MaintenanceSummary)Apply(T0.AddMinutes(20), new MaintenanceOp(TimeSpan.FromMinutes(5)))!;
+        await Assert.That(_store.GetJob("a")).IsNull();
+        await Assert.That(_store.GetQueueLength("q")).IsEqualTo(0);
+        await Assert.That(summary.OrphanedQueueEntriesRemoved).IsEqualTo(1);
+        await Assert.That(_store.GetStateCount("Succeeded")).IsEqualTo(0);
     }
 
     [Test]
-    public async Task RequeueFetched_ClearsExpiry_SoARequeuedExpiredJobSurvivesMaintenance()
+    public async Task RequeueFetched_KeepsTheExpiry_SoAFinishedJobStillExpires()
     {
+        // A worker committed Succeeded (+ expiry), then its ack failed and Hangfire requeued the job.
         Apply(T0, NewJob("a"), new EnqueueOp("q", "a"));
         var token = Guid.NewGuid();
         Apply(T0, new FetchOp(["q"], token));
-        Apply(T0, new ExpireJobOp("a", T0.AddMinutes(1)));
+        Apply(T0, new SetJobStateOp("a", State("Succeeded", T0)), new ExpireJobOp("a", T0.AddMinutes(1)));
 
-        Apply(T0, new RequeueFetchedOp(token)); // re-enqueued to run again -> expiry cleared
-        await Assert.That(_store.GetJob("a")!.ExpireAt).IsNull();
+        Apply(T0, new RequeueFetchedOp(token));
+        await Assert.That(_store.GetJob("a")!.ExpireAt).IsEqualTo(T0.AddMinutes(1));
+        await Assert.That(_store.GetQueueLength("q")).IsEqualTo(1);
 
         Apply(T0.AddMinutes(10), new MaintenanceOp(TimeSpan.FromMinutes(5)));
-        await Assert.That(_store.GetJob("a")).IsNotNull();
-        await Assert.That(_store.GetQueueLength("q")).IsEqualTo(1);
+        await Assert.That(_store.GetJob("a")).IsNull();
+        await Assert.That(_store.GetQueueLength("q")).IsEqualTo(0);
     }
 
     [Test]
@@ -793,6 +794,16 @@ public class RaftStoreTests
         await Assert.That(removed).IsEqualTo(1);
         var single = await Assert.That(_store.GetServers()).HasSingleItem();
         await Assert.That(single.Id).IsEqualTo("fresh");
+    }
+
+    [Test]
+    public async Task RemoveTimedOutServers_WithAHugeTimeout_SaturatesInsteadOfThrowing()
+    {
+        // A throwing handler would fault every replica on this committed entry, and again on every replay.
+        Apply(T0, new AnnounceServerOp("srv", 1, []));
+        var removed = (int)Apply(T0, new RemoveTimedOutServersOp(TimeSpan.MaxValue))!;
+        await Assert.That(removed).IsEqualTo(0);
+        await Assert.That(_store.GetServers()).HasSingleItem();
     }
 
     // ----- snapshot edge cases -----

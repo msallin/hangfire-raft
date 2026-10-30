@@ -60,6 +60,26 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     /// </summary>
     public bool HasLeader => _cluster?.Leader is not null;
 
+    /// <summary>
+    /// True once this node can no longer apply committed entries: either our own apply/decode/restore threw
+    /// (the state machine's flag), or DotNext's background applier failed outside our code. The latter covers
+    /// a failed snapshot write (e.g. a full disk): DotNext rethrows it on the next apply before calling our
+    /// ApplyAsync, then latches the failure in the WAL until disposal, so the state machine never sees it.
+    /// </summary>
+    private bool IsFaulted => _stateMachine.IsFaulted || (_wal is { } wal && HasApplierFailed(wal));
+
+    /// <summary>
+    /// Probes the WAL's latched applier failure without waiting: WaitForApplyAsync returns that failure
+    /// synchronously, and index 0 is always applied, so a healthy WAL completes the probe synchronously too.
+    /// </summary>
+    private static bool HasApplierFailed(WriteAheadLog wal)
+    {
+        var probe = wal.WaitForApplyAsync(0L);
+        if (!probe.IsFaulted) return false;
+        _ = probe.AsTask().Exception; // observe it, so the probe does not surface as an unobserved task exception
+        return true;
+    }
+
     /// <summary>Point-in-time view of cluster health for readiness/liveness checks.</summary>
     public RaftClusterHealth GetHealth()
     {
@@ -71,7 +91,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         var appliedIndex = wal?.LastAppliedIndex ?? 0L;
         var commitIndex = wal?.LastCommittedEntryIndex ?? 0L;
         if (cluster is null)
-            return new RaftClusterHealth { HasLeader = false, IsLeader = false, LeaderEndpoint = null, Term = 0, MemberCount = 0, Faulted = _stateMachine.IsFaulted, AppliedIndex = appliedIndex, CommitIndex = commitIndex };
+            return new RaftClusterHealth { HasLeader = false, IsLeader = false, LeaderEndpoint = null, Term = 0, MemberCount = 0, Faulted = IsFaulted, AppliedIndex = appliedIndex, CommitIndex = commitIndex };
 
         var leader = cluster.Leader;
         return new RaftClusterHealth
@@ -81,7 +101,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             LeaderEndpoint = leader?.EndPoint,
             Term = cluster.Term,
             MemberCount = cluster.Members.Count,
-            Faulted = _stateMachine.IsFaulted,
+            Faulted = IsFaulted,
             AppliedIndex = appliedIndex,
             CommitIndex = commitIndex,
         };
@@ -254,7 +274,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         // fault is visible on every attempt (the root cause is logged once when the fault first happens) and
         // points at the remedy. Recover the node by clearing its WAL to re-sync from the leader, or let an
         // orchestrator restart it via the GetHealth().Faulted probe.
-        if (_stateMachine.IsFaulted)
+        if (IsFaulted)
         {
             _logger.LogWarning("Rejecting command {CommandId}: the local state machine has faulted and can no longer apply committed entries; recover this node (clear its WAL to re-sync from the leader).", command.Id);
             throw new RaftStorageException("The local state machine has faulted; this node cannot serve writes until it is recovered.");

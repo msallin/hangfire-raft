@@ -101,6 +101,15 @@ public sealed class RaftStorageOptions
             throw new InvalidOperationException($"FetchInvisibilityTimeout must be positive (was {FetchInvisibilityTimeout}); it is divided by three to derive the fetch-lease renewal period.");
         if (MaintenanceInterval <= TimeSpan.Zero)
             throw new InvalidOperationException($"MaintenanceInterval must be positive (was {MaintenanceInterval}).");
+
+        // These drive Timer periods, Task.Delay and CancelAfter, which reject anything above ~49.7 days. An
+        // oversized lease or invisibility timeout would otherwise throw only AFTER its lock/fetch committed
+        // (leaving it held by nobody), and a near-MaxValue one would overflow the lease arithmetic inside the
+        // replicated apply and fault every node on that committed entry.
+        RequireTimerRange(nameof(SubmitTimeout), SubmitTimeout);
+        RequireTimerRange(nameof(MaintenanceInterval), MaintenanceInterval);
+        RequireTimerRange(nameof(LockLeaseTimeout) + " / 3 (the lock renewal period)", TimeSpan.FromTicks(LockLeaseTimeout.Ticks / 3));
+        RequireTimerRange(nameof(FetchInvisibilityTimeout) + " / 3 (the fetch-lease renewal period)", TimeSpan.FromTicks(FetchInvisibilityTimeout.Ticks / 3));
         if (LowerElectionTimeoutMs <= 0 || UpperElectionTimeoutMs <= 0 || LowerElectionTimeoutMs >= UpperElectionTimeoutMs)
             throw new InvalidOperationException(
                 $"Election timeouts must satisfy 0 < LowerElectionTimeoutMs ({LowerElectionTimeoutMs}) < UpperElectionTimeoutMs ({UpperElectionTimeoutMs}).");
@@ -112,6 +121,15 @@ public sealed class RaftStorageOptions
         // too-large or negative RpcPortOffset fails here, naming the offset, rather than as a bare
         // ArgumentOutOfRangeException from the listener bind or RpcEndpoint later.
         foreach (var member in members) _ = RpcEndpoint(member, RpcPortOffset);
+    }
+
+    /// <summary>The largest interval Timer, Task.Delay and CancellationTokenSource.CancelAfter accept (uint.MaxValue - 1 ms).</summary>
+    private static readonly TimeSpan MaxTimerInterval = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
+
+    private static void RequireTimerRange(string name, TimeSpan value)
+    {
+        if (value > MaxTimerInterval)
+            throw new InvalidOperationException($"{name} must not exceed {MaxTimerInterval} (was {value}).");
     }
 
     internal EndPoint Self => ParseEndpoint(SelfEndpoint);

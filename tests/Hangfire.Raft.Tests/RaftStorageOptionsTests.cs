@@ -155,6 +155,30 @@ public class RaftStorageOptionsTests
     }
 
     [Test]
+    [Arguments(nameof(RaftStorageOptions.FetchInvisibilityTimeout))]
+    [Arguments(nameof(RaftStorageOptions.LockLeaseTimeout))]
+    [Arguments(nameof(RaftStorageOptions.MaintenanceInterval))]
+    [Arguments(nameof(RaftStorageOptions.SubmitTimeout))]
+    public async Task Validate_Rejects_IntervalsBeyondTheTimerRange(string option)
+    {
+        // TimeSpan.MaxValue would otherwise pass, then throw from Timer/Task.Delay/CancelAfter at runtime, or
+        // overflow the lease arithmetic inside the replicated apply and fault every node.
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:5000" };
+        options.Members.Add("127.0.0.1:5000");
+        typeof(RaftStorageOptions).GetProperty(option)!.SetValue(options, TimeSpan.MaxValue);
+        await Assert.That(options.Validate).ThrowsExactly<InvalidOperationException>().WithMessageContaining(option);
+    }
+
+    [Test]
+    public async Task Validate_Accepts_ALeaseJustInsideTheTimerRange()
+    {
+        // The renewal period is a third of the lease, so the lease itself may be up to three timer maxima.
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:5000", LockLeaseTimeout = TimeSpan.FromDays(140), FetchInvisibilityTimeout = TimeSpan.FromDays(140) };
+        options.Members.Add("127.0.0.1:5000");
+        await Assert.That(() => options.Validate()).ThrowsNothing();
+    }
+
+    [Test]
     public async Task Validate_Rejects_RpcPortOffsetThatOverflowsThePortRange()
     {
         var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:65000", RpcPortOffset = 1000 };
