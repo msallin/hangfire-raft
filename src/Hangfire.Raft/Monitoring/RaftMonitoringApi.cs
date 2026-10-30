@@ -155,10 +155,11 @@ internal sealed class RaftMonitoringApi(RaftStore store) : JobStorageMonitor
         // Page from the "schedule" set ordered by score (the planned enqueue time), like the SQL
         // storage: the page then lists next-to-run first. The Scheduled state index would order by
         // state-transition time instead, which is meaningless for this page.
-        var ids = Store.GetRangeFromSet("schedule", from, from + count - 1);
-        var result = new List<KeyValuePair<string, ScheduledJobDto>>(ids.Count);
-        foreach (var id in ids)
+        var entries = Store.GetRangeFromSet("schedule", from, from + count - 1);
+        var result = new List<KeyValuePair<string, ScheduledJobDto>>(entries.Count);
+        foreach (var entry in entries)
         {
+            var id = ScheduleEntryJobId(entry);
             var job = Store.GetJob(id);
             if (job is null) continue;
             var data = StateData(job, ScheduledState.StateName);
@@ -314,6 +315,17 @@ internal sealed class RaftMonitoringApi(RaftStore store) : JobStorageMonitor
     }
 
     private static bool InState(JobSnapshot job, string stateName) => job.CurrentState?.Name == stateName;
+
+    /// <summary>
+    /// Job id of a "schedule" set entry. Hangfire's ScheduledState stores a job with an explicit queue as
+    /// "{queue}:{jobId}" (queue names cannot contain ':'), and DelayedJobScheduler splits on the first colon.
+    /// Input: "abc" -> "abc"; "critical:abc" -> "abc".
+    /// </summary>
+    internal static string ScheduleEntryJobId(string entry)
+    {
+        var colon = entry.IndexOf(':');
+        return colon < 0 ? entry : entry[(colon + 1)..];
+    }
 
     private static Job? TryDeserializeJob(string payload, out JobLoadException? exception)
     {
