@@ -16,4 +16,10 @@ public sealed class RaftStorageException : Exception
     public RaftStorageException(string message, Exception innerException) : base(message, innerException)
     {
     }
+
+    /// <summary>
+    /// True when the failed write provably never reached the replicated log (rejected before the hand-off, or
+    /// no leader within the submit timeout), so it cannot commit later. False when the outcome is unknown.
+    /// </summary>
+    internal bool NotAppended { get; init; }
 }

@@ -150,4 +150,23 @@ public class CommandForwardingTests
         await Assert.That(RaftStorageCluster.IsRetryable(new InvalidOperationException())).IsFalse();
         await Assert.That(RaftStorageCluster.IsRetryable(new RaftStorageException("x"))).IsFalse();
     }
+
+    [Test]
+    public async Task ForwardedReplicateFailure_IsNotLeader_OnlyBeforeTheAppend()
+    {
+        // The leader's reply decides whether the follower may resend: NotLeader is retried, Ambiguous is not.
+        await Assert.That(RaftStorageCluster.ForwardedReplicateFailure(new NotLeaderException()).Status)
+            .IsEqualTo(ForwardingProtocol.StatusNotLeader);
+
+        // Leadership lost after the append (DotNext wraps the leader-state cancellation/disposal), the deadline,
+        // or any other failure: the entry may already be in the log, so the follower must wait, not resend.
+        await Assert.That(RaftStorageCluster.ForwardedReplicateFailure(new NotLeaderException(new OperationCanceledException())).Status)
+            .IsEqualTo(ForwardingProtocol.StatusAmbiguous);
+        await Assert.That(RaftStorageCluster.ForwardedReplicateFailure(new NotLeaderException(new ObjectDisposedException("leader"))).Status)
+            .IsEqualTo(ForwardingProtocol.StatusAmbiguous);
+        await Assert.That(RaftStorageCluster.ForwardedReplicateFailure(new OperationCanceledException()).Status)
+            .IsEqualTo(ForwardingProtocol.StatusAmbiguous);
+        await Assert.That(RaftStorageCluster.ForwardedReplicateFailure(new IOException()).Status)
+            .IsEqualTo(ForwardingProtocol.StatusAmbiguous);
+    }
 }

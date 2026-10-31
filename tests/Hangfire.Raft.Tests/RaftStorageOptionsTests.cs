@@ -170,6 +170,18 @@ public class RaftStorageOptionsTests
     }
 
     [Test]
+    [Arguments(nameof(RaftStorageOptions.SubmitTimeout))]
+    [Arguments(nameof(RaftStorageOptions.MaintenanceInterval))]
+    public async Task Validate_Rejects_AnIntervalJustAboveTheTimerRange(string option)
+    {
+        // ~49.7 days is the limit; a guard that only rejected TimeSpan.MaxValue would let 50 days through.
+        var options = new RaftStorageOptions { SelfEndpoint = "127.0.0.1:5000" };
+        options.Members.Add("127.0.0.1:5000");
+        typeof(RaftStorageOptions).GetProperty(option)!.SetValue(options, TimeSpan.FromDays(50));
+        await Assert.That(options.Validate).ThrowsExactly<InvalidOperationException>().WithMessageContaining(option);
+    }
+
+    [Test]
     public async Task Validate_Accepts_ALeaseJustInsideTheTimerRange()
     {
         // The renewal period is a third of the lease, so the lease itself may be up to three timer maxima.
