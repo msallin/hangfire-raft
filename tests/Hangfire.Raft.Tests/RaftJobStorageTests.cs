@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using DotNext.Net.Cluster.Consensus.Raft.Membership;
+using DotNext.Threading;
 using Hangfire.Common;
 using Hangfire.Raft.Cluster;
 using Hangfire.States;
@@ -16,7 +17,7 @@ namespace Hangfire.Raft.Tests;
 /// </summary>
 public class RaftJobStorageTests
 {
-    // Each node keeps its own write-ahead log on disk and flushes it in the background. On a slow shared
+    // Each node keeps its own write-ahead log on disk and flushes it before committing. On a slow shared
     // CI disk that fsync traffic, multiplied across co-located clusters, can push tests past their
     // election/submit deadlines, so CI points this at a tmpfs (HANGFIRE_RAFT_TEST_WAL_ROOT=/dev/shm) where
     // fsync is near-free. Locally it falls back to the temp directory. This changes only where the bytes
@@ -119,6 +120,107 @@ public class RaftJobStorageTests
             if (DateTime.UtcNow > deadline) throw new TimeoutException($"Timed out waiting for: {description}");
             await Task.Delay(100);
         }
+    }
+
+    [Test]
+    public async Task ResolveChunkSize_PinsTheSizeOfANewLog()
+    {
+        Directory.CreateDirectory(_walRoot);
+        var file = Path.Combine(_walRoot, "chunk-size");
+
+        var size = RaftStorageCluster.ResolveChunkSize(file, hasExistingLog: false);
+
+        await Assert.That(size).IsEqualTo(1024 * 1024);
+        await Assert.That(await File.ReadAllTextAsync(file)).IsEqualTo("1048576");
+
+        // Once pinned the size is read back, now that the log exists.
+        await Assert.That(RaftStorageCluster.ResolveChunkSize(file, hasExistingLog: true)).IsEqualTo(1024 * 1024);
+    }
+
+    [Test]
+    public async Task ResolveChunkSize_LeavesAnExistingUnpinnedLogOnTheDefault()
+    {
+        Directory.CreateDirectory(_walRoot);
+        var file = Path.Combine(_walRoot, "chunk-size");
+
+        await Assert.That(RaftStorageCluster.ResolveChunkSize(file, hasExistingLog: true)).IsNull();
+        await Assert.That(File.Exists(file)).IsFalse();
+    }
+
+    [Test]
+    public async Task ResolveChunkSize_RejectsADamagedFile()
+    {
+        Directory.CreateDirectory(_walRoot);
+        var file = Path.Combine(_walRoot, "chunk-size");
+        await File.WriteAllTextAsync(file, "");
+
+        await Assert.That(() => RaftStorageCluster.ResolveChunkSize(file, hasExistingLog: true)).ThrowsExactly<FormatException>();
+    }
+
+    [Test]
+    [RetryWithDelay(3, 500)]
+    public async Task Restart_Faults_WhenALogEntryIsNotACommand()
+    {
+        // Reopening a log with another chunk size makes entries resolve to the wrong bytes, the same damage
+        // a chunk-boundary bug leaves behind. Replay must fault instead of skipping them as bookkeeping.
+        var port = AllocatePortPairs(1)[0];
+        var walPath = Path.Combine(_walRoot, port.ToString());
+        var chunkSizeFile = Path.Combine(walPath, "chunk-size");
+        Directory.CreateDirectory(walPath);
+        await File.WriteAllTextAsync(chunkSizeFile, "4096");
+
+        var first = await StartNode(port, [port], walPath);
+        await PollUntil(() => first.GetHealth().HasLeader, "the node elects itself leader");
+        using (var connection = first.GetConnection())
+        {
+            for (var i = 0; i < 40; i++) connection.SetRangeInHash("h", [new($"f{i}", new string('x', 300))]);
+        }
+
+        await first.DisposeAsync();
+        _storages.Remove(first);
+        await File.WriteAllTextAsync(chunkSizeFile, "1048576");
+
+        // Replay during startup surfaces the fault by failing the start.
+        var exception = await Assert.That(async Task () => await StartNode(port, [port], walPath)).ThrowsExactly<PendingTaskInterruptedException>();
+        await Assert.That(exception!.ToString()).Contains("is not a command");
+    }
+
+    [Test]
+    [RetryWithDelay(3, 500)]
+    public async Task FollowerWrites_DoNotWaitForAHeartbeat_AndReplicasMatchAcrossLogChunks()
+    {
+        // Production election timeouts: the heartbeat is 750 ms, so a write that waited for one is obvious.
+        // The values add up to more than a page of log, which is where a chunk-boundary bug loses commands.
+        var ports = AllocatePortPairs(3);
+        var nodes = await Task.WhenAll(ports.Select(port => StartNode(port, ports, configure: o =>
+        {
+            o.LowerElectionTimeoutMs = 1500;
+            o.UpperElectionTimeoutMs = 3000;
+        })));
+        await PollUntil(() => nodes.All(n => n.GetHealth().HasLeader), "every node sees a leader", 30);
+        var follower = nodes.First(n => !n.GetHealth().IsLeader);
+
+        var latencies = new List<TimeSpan>();
+        using (var connection = follower.GetConnection())
+        {
+            for (var i = 0; i < 40; i++)
+            {
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                connection.SetRangeInHash("h", [new($"f{i}", new string('x', 300))]);
+                latencies.Add(System.Diagnostics.Stopwatch.GetElapsedTime(started));
+            }
+        }
+
+        latencies.Sort();
+        await Assert.That(latencies[latencies.Count / 2]).IsLessThan(TimeSpan.FromMilliseconds(300));
+
+        await PollUntil(
+            () => nodes.All(n =>
+            {
+                using var connection = n.GetConnection();
+                return connection.GetAllEntriesFromHash("h")?.Count == 40;
+            }),
+            "every replica holds every write");
     }
 
     [Test]
