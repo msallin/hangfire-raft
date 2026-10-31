@@ -81,7 +81,7 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
 * **Durability**: a write is acknowledged once it is committed (replicated to a majority) and
   applied locally, so it survives any single node failing — the surviving quorum still holds it, and
   a node that crashed recovers the entry from the leader when it restarts. Each node also persists
-  committed entries to its own write-ahead log on `WalPath` (flushed eagerly in the background as
+  committed entries to its own write-ahead log on `WalPath` (checkpointed as
   entries commit) and compacts the log into snapshots; on restart a node replays snapshot + log,
   then catches up from the leader. Because acknowledgement waits for in-memory quorum rather than an
   fsync on every node, a simultaneous crash of the whole committing majority before any of them
@@ -104,7 +104,6 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
 | `FetchInvisibilityTimeout` | 5 min | A crashed worker's job becomes fetchable again on the first maintenance pass after this (so up to `+ MaintenanceInterval`, and only with quorum). |
 | `MaintenanceInterval` | 30 s | Leader cleanup cadence. |
 | `SnapshotInterval` | 4096 | Applied log entries between state-machine snapshots; the log compacts up to each snapshot. A tuning/testing knob. |
-| `FlushInterval` | 0 | How the WAL persists committed entries to local disk. `0` (default) flushes eagerly in the background as entries commit; a positive value batches into one fsync per interval (more throughput, but a crash loses up to that interval locally, re-replicated from the quorum). Durability comes from quorum, not this flush. |
 | `LowerElectionTimeoutMs` / `UpperElectionTimeoutMs` | 1500 / 3000 | Raft election timeouts. |
 | `LoggerFactory` | none | Diagnostics for the cluster and storage. |
 
@@ -121,8 +120,9 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
   comfortable for typical background-job workloads (hundreds of writes/second on a LAN), but
   it is not a Redis replacement for six-figure jobs-per-minute setups.
 * Hangfire's storage API is synchronous, so each write blocks a worker thread while the cluster
-  replicates and applies it on the thread pool (the local flush happens in the background, off the
-  acknowledgement path). Under many concurrent workers, raise the
+  replicates and applies it on the thread pool. A node flushes entries to its write-ahead log before
+  committing them, so slow `WalPath` storage adds directly to write latency and can push a write to
+  `SubmitTimeout`. Under many concurrent workers, raise the
   thread-pool floor (`ThreadPool.SetMinThreads`) so those continuations are not starved and a write
   does not stall to `SubmitTimeout`; the default floor grows by only ~1 thread/second.
 * Job execution is **at-least-once**, like other Hangfire storages: a worker that dies after
