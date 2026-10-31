@@ -25,9 +25,9 @@ updates:
           - minor
           - patch
     ignore:
-      # DotNext 6.x is a breaking rewrite of the write-ahead log; the upgrade is parked on the
-      # dotnext-6-migration branch pending a deliberate migration, so do not auto-propose 6.x here.
-      # Minor/patch updates within the current major line are still picked up.
+      # A DotNext major can change the write-ahead log format, and every Dependabot PR merges itself
+      # once CI is green, so a major upgrade stays a deliberate migration. Minor/patch updates within
+      # the current major line are still picked up.
       - dependency-name: "DotNext.Net.Cluster"
         update-types: ["version-update:semver-major"]
 

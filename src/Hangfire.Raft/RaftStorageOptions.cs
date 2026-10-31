@@ -52,19 +52,6 @@ public sealed class RaftStorageOptions
     /// </summary>
     public int SnapshotInterval { get; set; } = 4096;
 
-    /// <summary>
-    /// How the write-ahead log persists committed entries to this node's local disk. Durability does not
-    /// depend on this: a committed entry is held by a majority of nodes, and a node that restarts recovers
-    /// any not-yet-flushed tail from the current leader. <see cref="TimeSpan.Zero"/> (the default) flushes
-    /// eagerly in the background as each entry commits, which keeps the node's on-disk copy current without
-    /// blocking the writer. A positive value batches commits into one fsync per interval (higher write
-    /// throughput, but a crash can lose up to that interval of locally-unflushed entries, which a
-    /// multi-node cluster re-replicates from the quorum on restart). <see cref="Timeout.InfiniteTimeSpan"/>
-    /// disables background flushing entirely: this node then never persists committed entries to disk on its
-    /// own, so after a restart it recovers everything past its last snapshot from the quorum.
-    /// </summary>
-    public TimeSpan FlushInterval { get; set; } = TimeSpan.Zero;
-
     /// <summary>Raft election timeout lower bound in milliseconds.</summary>
     public int LowerElectionTimeoutMs { get; set; } = 1500;
 

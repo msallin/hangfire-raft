@@ -183,13 +183,11 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             await cluster._stateMachine.RestoreAsync(token).ConfigureAwait(false);
             var hasExistingLog = Directory.EnumerateFileSystemEntries(cluster._logPath).Any();
 
-            // The background flusher persists committed entries to local disk; with FlushInterval.Zero (the
-            // default) it flushes eagerly as each entry commits. Durability is a cluster property, not a
-            // per-node one: an entry is durable once it is committed (held by a majority), and a node
-            // recovers any tail it had not yet flushed from the leader when it restarts. The local flush
-            // only governs how current this node's own on-disk copy is.
+            // The WAL checkpoints to local disk on every commit. Durability is still a cluster property, not
+            // a per-node one: an entry is durable once it is committed (held by a majority), and a node
+            // recovers anything it lost locally from the leader when it restarts.
             cluster._wal = new WriteAheadLog(
-                new WriteAheadLog.Options { Location = cluster._logPath, FlushInterval = options.FlushInterval },
+                new WriteAheadLog.Options { Location = cluster._logPath },
                 cluster._stateMachine);
 
             // Replay the committed-but-unsnapshotted tail now so the node is fully caught up before it
@@ -362,8 +360,8 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
 
             // The waiter completes once the entry is committed (held by a majority) and applied to the local
             // store. That is the durability boundary: a committed entry survives any single node failing
-            // because the surviving quorum still holds it. Persisting it to local disk happens in the
-            // background (and on a graceful shutdown), so it is deliberately not awaited here.
+            // because the surviving quorum still holds it. The WAL flushes an entry to local disk before
+            // committing it, so a slow disk delays this wait.
             return await waiter.WaitAsync(linked).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
@@ -570,12 +568,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             await _cluster.DisposeAsync().ConfigureAwait(false);
         }
 
-        // No explicit shutdown flush. With the eager background flusher (FlushInterval.Zero) an acked write
-        // is persisted shortly after it commits, and any tail a node had not yet flushed is recovered from
-        // the leader when it restarts. DotNext's WriteAheadLog.FlushAsync only waits for the background
-        // flusher (it cannot force an immediate flush of the final entry), so it is not a usable teardown
-        // primitive; a single node configured with a non-eager FlushInterval can therefore lose its
-        // unflushed tail on shutdown, which is acceptable only because a single node is development-only.
+        // No explicit shutdown flush: the WAL already checkpointed every entry when it committed.
         if (_wal is not null) await _wal.DisposeAsync().ConfigureAwait(false);
         await _stateMachine.DisposeAsync().ConfigureAwait(false);
         _configStorage.Dispose();

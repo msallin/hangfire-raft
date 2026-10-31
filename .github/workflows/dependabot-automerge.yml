@@ -5,6 +5,11 @@ name: Dependabot auto-merge
 #   1. "Allow auto-merge" enabled on the repository.
 #   2. A branch-protection rule on main that marks "Build & Test" as a required status check.
 # Without the required check, GitHub merges immediately instead of waiting for CI to go green.
+#
+# Dependabot only rewrites the lock files of the projects whose PackageReference it changed. A project
+# that gets the package through a ProjectReference (the samples, and the tests when TUnit is not part
+# of the same bump) keeps a stale lock file, which fails the --locked-mode restore in CI. The
+# refresh-lock-files job regenerates them all, so such a PR can still merge itself.
 
 on: pull_request
 
@@ -15,6 +20,40 @@ permissions:
   pull-requests: write
 
 jobs:
+  refresh-lock-files:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    # Job-level permissions replace the workflow-level ones. actions: write dispatches the CI run.
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Regenerate lock files
+        run: dotnet restore Hangfire.Raft.slnx --force-evaluate
+
+      - name: Commit and re-run CI
+        # [dependabot skip] lets Dependabot keep rebasing the PR despite the extra commit.
+        run: |
+          git add '**/packages.lock.json'
+          git diff --cached --quiet && exit 0
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'build(deps): refresh lock files [dependabot skip]'
+          git push
+          gh workflow run ci.yml --ref "$HEAD_REF"
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   auto-merge:
     runs-on: ubuntu-latest
     if: github.event.pull_request.user.login == 'dependabot[bot]'

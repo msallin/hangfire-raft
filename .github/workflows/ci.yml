@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  # A push made with GITHUB_TOKEN triggers no workflow, so the Dependabot lock-file refresh dispatches
+  # this run itself. Without it the required "Build & Test" check never reports on the refreshed commit.
+  workflow_dispatch:
 
 jobs:
   build-test:
