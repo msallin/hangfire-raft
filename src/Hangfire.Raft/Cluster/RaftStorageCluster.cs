@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using DotNext.Net.Cluster.Consensus.Raft;
 using DotNext.Net.Cluster.Consensus.Raft.Membership;
@@ -24,6 +25,11 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     private readonly IClusterConfigurationStorage<EndPoint> _configStorage;
     private readonly IReadOnlyList<EndPoint> _clusterMembers;
     private readonly bool _coldStart;
+    // DotNext's default of one page keeps a file, handle and mapping per 4 KiB of log, which costs
+    // throughput and handles. Must stay a power of two: entries are addressed by masking with it.
+    private const int NewLogChunkSize = 1024 * 1024;
+    private const string ChunkSizeFileName = "chunk-size";
+
     private readonly string _logPath;
     private readonly string _configFile;
     private readonly ForwardingServer _forwardingServer;
@@ -62,9 +68,10 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
 
     /// <summary>
     /// True once this node can no longer apply committed entries: either our own apply/decode/restore threw
-    /// (the state machine's flag), or DotNext's background applier failed outside our code. The latter covers
-    /// a failed snapshot write (e.g. a full disk): DotNext rethrows it on the next apply before calling our
-    /// ApplyAsync, then latches the failure in the WAL until disposal, so the state machine never sees it.
+    /// (the state machine's flag), or one of DotNext's background tasks (applier, flusher, cleaner) failed
+    /// outside our code. The latter covers a failed snapshot write (e.g. a full disk): DotNext rethrows it on
+    /// the next apply before calling our ApplyAsync, then latches the failure in the WAL until disposal, so
+    /// the state machine never sees it.
     /// </summary>
     private bool IsFaulted => _stateMachine.IsFaulted || (_wal is { } wal && HasApplierFailed(wal));
 
@@ -176,18 +183,20 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
 
             // Restore the latest snapshot into the state machine before building the WAL over it, so the
             // tail replay below applies on top of the restored state rather than an empty store. This is
-            // the strictly-necessary explicit step: RaftCluster.StartAsync replays the committed tail (via
-            // AuditTrail.InitializeAsync) on its own, but it never restores the SimpleStateMachine
-            // snapshot, so without this a restart would rebuild only the post-snapshot tail and lose
-            // everything the snapshot held (verified: dropping it fails the WAL-replay tests in isolation).
+            // the strictly-necessary explicit step: the WAL constructor reads the restored snapshot to find
+            // where the log starts, and RaftCluster.StartAsync replays the committed tail (via
+            // AuditTrail.InitializeAsync) on its own, but neither restores the SimpleStateMachine snapshot.
             await cluster._stateMachine.RestoreAsync(token).ConfigureAwait(false);
             var hasExistingLog = Directory.EnumerateFileSystemEntries(cluster._logPath).Any();
+            var chunkSize = ResolveChunkSize(Path.Combine(options.WalPath, ChunkSizeFileName), hasExistingLog);
 
             // The WAL checkpoints to local disk on every commit. Durability is still a cluster property, not
             // a per-node one: an entry is durable once it is committed (held by a majority), and a node
             // recovers anything it lost locally from the leader when it restarts.
             cluster._wal = new WriteAheadLog(
-                new WriteAheadLog.Options { Location = cluster._logPath },
+                chunkSize is { } size
+                    ? new WriteAheadLog.Options { Location = cluster._logPath, ChunkSize = size }
+                    : new WriteAheadLog.Options { Location = cluster._logPath },
                 cluster._stateMachine);
 
             // Replay the committed-but-unsnapshotted tail now so the node is fully caught up before it
@@ -329,6 +338,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
                         // Returns once the entry is committed; throws otherwise. Either way stop sending
                         // and let the local apply waiter return the result (or time out).
                         await cluster.ReplicateAsync(payload, null, linked).ConfigureAwait(false);
+                        _ = PublishCommitAsync(cluster);
                     }
                     catch (Exception ex) when (ex is not (OperationCanceledException or ObjectDisposedException) && !IsRetryable(ex))
                     {
@@ -446,12 +456,51 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             // leadership loss before append is retryable, anything else is ambiguous (the entry may
             // already sit in the log, including when the deadline above fires).
             await cluster.ReplicateAsync(payload, null, deadline.Token).ConfigureAwait(false);
+            _ = PublishCommitAsync(cluster);
             return (ForwardingProtocol.StatusOk, null);
         }
         catch (Exception ex)
         {
             return ForwardedReplicateFailure(ex);
         }
+    }
+
+    /// <summary>
+    /// Starts a replication round right after a commit, without waiting for it. AppendEntries carries the
+    /// commit index from before its round, so followers otherwise learn of a commit only on the next
+    /// heartbeat. That would delay every write submitted on a follower by up to a heartbeat, because a write
+    /// completes once it is applied locally. Failing here is harmless: the next heartbeat delivers the index.
+    /// </summary>
+    private async Task PublishCommitAsync(RaftCluster cluster)
+    {
+        try
+        {
+            await cluster.ForceReplicationAsync(_lifetime.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not start a replication round after a commit; the next heartbeat delivers it.");
+        }
+    }
+
+    /// <summary>
+    /// Returns the chunk size for this node's log, or null for DotNext's default. A log cannot change chunk
+    /// size: entries are addressed by it, so reopening with another size reads the wrong bytes. New logs pin
+    /// their size in <paramref name="chunkSizeFile"/>, which outlives any change to the size used for new
+    /// logs. A log without that file predates it and was written with the default.
+    /// </summary>
+    internal static int? ResolveChunkSize(string chunkSizeFile, bool hasExistingLog)
+    {
+        if (File.Exists(chunkSizeFile))
+            return int.Parse(File.ReadAllText(chunkSizeFile), CultureInfo.InvariantCulture);
+
+        if (hasExistingLog) return null;
+
+        // Written through a temp file so a crash cannot leave an empty file that fails every later start.
+        var temporaryFile = chunkSizeFile + ".tmp";
+        File.WriteAllText(temporaryFile, NewLogChunkSize.ToString(CultureInfo.InvariantCulture));
+        File.Move(temporaryFile, chunkSizeFile, overwrite: true);
+        return NewLogChunkSize;
     }
 
     /// <summary>
@@ -568,7 +617,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             await _cluster.DisposeAsync().ConfigureAwait(false);
         }
 
-        // No explicit shutdown flush: the WAL already checkpointed every entry when it committed.
+        // No explicit shutdown flush: disposing the WAL flushes it and writes the final checkpoint.
         if (_wal is not null) await _wal.DisposeAsync().ConfigureAwait(false);
         await _stateMachine.DisposeAsync().ConfigureAwait(false);
         _configStorage.Dispose();

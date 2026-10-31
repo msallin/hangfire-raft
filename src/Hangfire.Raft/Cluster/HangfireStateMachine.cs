@@ -73,6 +73,16 @@ internal sealed class HangfireStateMachine : SimpleStateMachine
                 throw new RaftStorageException($"Failed to decode the committed Raft log entry at index {entry.Index}; the on-disk state may be corrupt or from an incompatible version.", ex);
             }
 
+            // Raft bookkeeping entries (no-ops, configuration) carry no payload, so a non-empty entry that is
+            // not a command is damaged: its recorded offset no longer points at the command. Skipping it would
+            // silently leave this replica behind, exactly like the undecodable case above.
+            if (command is null && !payload.IsEmpty)
+            {
+                _logger.LogError("The committed log entry at index {Index} is not a command; the on-disk state is corrupt.", entry.Index);
+                _faulted = true;
+                throw new RaftStorageException($"The committed Raft log entry at index {entry.Index} is not a command; the on-disk state is corrupt.");
+            }
+
             if (command is not null)
             {
                 try

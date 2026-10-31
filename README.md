@@ -80,12 +80,12 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
   not). Keep node clocks reasonably synchronized (NTP) because expirations compare those timestamps.
 * **Durability**: a write is acknowledged once it is committed (replicated to a majority) and
   applied locally, so it survives any single node failing — the surviving quorum still holds it, and
-  a node that crashed recovers the entry from the leader when it restarts. Each node also persists
-  committed entries to its own write-ahead log on `WalPath` (checkpointed as
-  entries commit) and compacts the log into snapshots; on restart a node replays snapshot + log,
-  then catches up from the leader. Because acknowledgement waits for in-memory quorum rather than an
-  fsync on every node, a simultaneous crash of the whole committing majority before any of them
-  flushes (for example a single-rack power loss) can still lose a just-committed entry — run an odd
+  a node that crashed recovers the entry from the leader when it restarts. Each node flushes entries
+  to its own write-ahead log on `WalPath` before committing them locally and compacts the log into snapshots;
+  on restart a node replays snapshot + log, then catches up from the leader. The leader and the
+  submitting node have a write on disk when it is acknowledged, but other followers confirm
+  replication before flushing, so a simultaneous crash of the nodes holding it (for example a
+  single-rack power loss) can still lose a just-committed entry — run an odd
   number of nodes and spread them across failure domains. A single node has no quorum to fall back
   on, so it is a development-only configuration.
 * **Maintenance**: the current leader periodically evicts expired jobs/sets/hashes/lists/
@@ -122,7 +122,8 @@ Hangfire API call (enqueue, state change, fetch, lock, ...)
 * Hangfire's storage API is synchronous, so each write blocks a worker thread while the cluster
   replicates and applies it on the thread pool. A node flushes entries to its write-ahead log before
   committing them, so slow `WalPath` storage adds directly to write latency and can push a write to
-  `SubmitTimeout`. Under many concurrent workers, raise the
+  `SubmitTimeout`. The leader commits inside its heartbeat loop, so a disk stall longer than about
+  half the election timeout can trigger an election. Under many concurrent workers, raise the
   thread-pool floor (`ThreadPool.SetMinThreads`) so those continuations are not starved and a write
   does not stall to `SubmitTimeout`; the default floor grows by only ~1 thread/second.
 * Job execution is **at-least-once**, like other Hangfire storages: a worker that dies after
