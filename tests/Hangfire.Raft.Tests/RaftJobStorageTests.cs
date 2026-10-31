@@ -246,6 +246,36 @@ public class RaftJobStorageTests
 
     [Test]
     [RetryWithDelay(3, 500)]
+    public async Task WithoutQuorum_ZeroTimeoutLockFailsFast_AndAWriteIsReportedAsNotAppended()
+    {
+        // 1 of 2 members reachable: no leader can be elected.
+        var port = AllocatePortPairs(1)[0];
+        var options = new RaftStorageOptions
+        {
+            SelfEndpoint = $"127.0.0.1:{port}",
+            WalPath = Path.Combine(_walRoot, $"no-quorum-{port}"),
+            LowerElectionTimeoutMs = 150,
+            UpperElectionTimeoutMs = 300,
+            SubmitTimeout = TimeSpan.FromSeconds(2),
+        };
+        options.Members.Add($"127.0.0.1:{port}");
+        options.Members.Add("does-not-exist.invalid:6000");
+        var storage = await RaftJobStorage.StartAsync(options);
+        _storages.Add(storage);
+        using var connection = (JobStorageConnection)storage.GetConnection();
+
+        // A non-blocking acquire must not wait out the submit timeout when there is no leader to commit it.
+        var started = DateTime.UtcNow;
+        await Assert.That(() => connection.AcquireDistributedLock("locks:no-quorum", TimeSpan.Zero)).ThrowsExactly<DistributedLockTimeoutException>();
+        await Assert.That(DateTime.UtcNow - started).IsLessThan(TimeSpan.FromSeconds(1));
+
+        // A write that never found a leader provably never reached the log (so it needs no compensation).
+        var failure = await Assert.That(() => connection.SetRangeInHash("h", [new("f", "v")])).ThrowsExactly<RaftStorageException>();
+        await Assert.That(failure!.NotAppended).IsTrue();
+    }
+
+    [Test]
+    [RetryWithDelay(3, 500)]
     public async Task GetHealth_ReportsFaulted_WhenASnapshotWriteFails()
     {
         // A failed snapshot write is rethrown by DotNext on the next apply, before our ApplyAsync runs, and

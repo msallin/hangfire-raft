@@ -52,11 +52,12 @@ internal sealed class RaftDistributedLock : IDisposable
             // short timeout is honored during an outage rather than blocking for the full SubmitTimeout.
             // The first attempt is always made, even with a zero timeout: like SQL Server's sp_getapplock
             // with a zero timeout, a non-blocking acquire of a free lock must succeed. Without a budget of its
-            // own it is bounded by SubmitTimeout like any other write.
+            // own it is bounded by SubmitTimeout like any other write, unless there is no leader to commit it:
+            // then it could only wait out an election or quorum loss, which a non-blocking acquire must not do.
             var remaining = deadline - DateTime.UtcNow;
             if (remaining <= TimeSpan.Zero)
             {
-                if (attempt > 0) throw new DistributedLockTimeoutException(resource);
+                if (attempt > 0 || !cluster.HasLeader) throw new DistributedLockTimeoutException(resource);
                 remaining = cluster.Options.SubmitTimeout;
             }
 
@@ -104,13 +105,14 @@ internal sealed class RaftDistributedLock : IDisposable
                 throw new DistributedLockTimeoutException(resource);
             }
         }
-        catch (Exception ex) when (ex is DistributedLockTimeoutException or RaftStorageException)
+        catch (Exception ex) when (ex is DistributedLockTimeoutException or RaftStorageException { NotAppended: false })
         {
             // The attempt may have been handed to the cluster and still commit (an ambiguous timeout, or a
             // cancel that landed after the append), which would leave the lock held by an owner that nobody
             // renews or releases until its lease expires, stalling every other acquirer. The release is
-            // owner-scoped, so it is a no-op if nothing was acquired. Best effort: it can still lose a race
-            // with an acquire that is in flight at this moment, which then resolves at lease expiry.
+            // owner-scoped, so it is a no-op if nothing was acquired; a write that provably never reached the
+            // log needs none. A cancelled attempt cannot tell, so it releases. Best effort: it can still lose a
+            // race with an acquire that is in flight at this moment, which then resolves at lease expiry.
             _ = ReleaseAbandonedAsync(cluster, resource, owner);
             throw;
         }

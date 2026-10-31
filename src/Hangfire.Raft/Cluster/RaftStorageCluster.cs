@@ -266,7 +266,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
     {
         // A worker that submits during/after shutdown gets the documented storage exception rather
         // than a raw ObjectDisposedException from the cancellation source it is about to link.
-        if (_lifetime.IsCancellationRequested) throw new RaftStorageException("The storage is shutting down.");
+        if (_lifetime.IsCancellationRequested) throw new RaftStorageException("The storage is shutting down.") { NotAppended = true };
 
         // A faulted state machine can no longer apply committed entries, so the local apply that completes
         // this write's waiter will never run: the write would otherwise block for the full SubmitTimeout and
@@ -277,7 +277,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         if (IsFaulted)
         {
             _logger.LogWarning("Rejecting command {CommandId}: the local state machine has faulted and can no longer apply committed entries; recover this node (clear its WAL to re-sync from the leader).", command.Id);
-            throw new RaftStorageException("The local state machine has faulted; this node cannot serve writes until it is recovered.");
+            throw new RaftStorageException("The local state machine has faulted; this node cannot serve writes until it is recovered.") { NotAppended = true };
         }
 
         var cluster = _cluster!; // non-null once StartAsync has returned, which is before any submit
@@ -368,7 +368,7 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         {
-            if (_lifetime.IsCancellationRequested) throw new RaftStorageException("The storage is shutting down.");
+            if (_lifetime.IsCancellationRequested) throw new RaftStorageException("The storage is shutting down.") { NotAppended = !appended };
 
             // A timeout AFTER the command was handed to the cluster is ambiguous (it may already be
             // committed), so it is surfaced distinctly from a pre-handoff timeout (no leader / no quorum),
@@ -378,15 +378,15 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             if (appended) RaftMetrics.AmbiguousWrites.Add(1);
             throw appended
                 ? new RaftStorageException($"The storage write for command {command.Id} did not apply within {_options.SubmitTimeout}; it was handed to the cluster and may already be committed (ambiguous outcome).")
-                : new RaftStorageException($"The storage write did not reach a leader within {_options.SubmitTimeout}. The cluster may have no leader or no quorum.");
+                : new RaftStorageException($"The storage write did not reach a leader within {_options.SubmitTimeout}. The cluster may have no leader or no quorum.") { NotAppended = true };
         }
         catch (Exception ex) when (ex is not (RaftStorageException or OperationCanceledException))
         {
             // Surface every failure as the documented storage exception so Hangfire treats it as
             // transient and retries, instead of crashing a worker with a raw cluster/IO exception.
             throw _lifetime.IsCancellationRequested
-                ? new RaftStorageException("The storage is shutting down.", ex)
-                : new RaftStorageException("The storage write failed unexpectedly.", ex);
+                ? new RaftStorageException("The storage is shutting down.", ex) { NotAppended = !appended }
+                : new RaftStorageException("The storage write failed unexpectedly.", ex) { NotAppended = !appended };
         }
         finally
         {
@@ -450,21 +450,22 @@ internal sealed class RaftStorageCluster : IAsyncDisposable
             await cluster.ReplicateAsync(payload, null, deadline.Token).ConfigureAwait(false);
             return (ForwardingProtocol.StatusOk, null);
         }
-        catch (NotLeaderException ex) when (IsNotLeaderBeforeAppend(ex))
+        catch (Exception ex)
         {
-            // Leadership was lost before the entry was appended: safe for the submitter to re-resolve
-            // the new leader and retry, so this is NotLeader, not an ambiguous outcome. A NotLeaderException
-            // raised after the append falls through to the ambiguous branch below.
-            return (ForwardingProtocol.StatusNotLeader, null);
-        }
-        catch (Exception)
-        {
-            // From here the entry may already sit in the log; only the submitter's local apply can
-            // tell whether it committed (this includes hitting the deadline above). Detail stays local
-            // rather than leaking to the caller.
-            return (ForwardingProtocol.StatusAmbiguous, "outcome unknown");
+            return ForwardedReplicateFailure(ex);
         }
     }
+
+    /// <summary>
+    /// Maps a failed leader-side replicate of a forwarded command to the status sent back to the submitter.
+    /// Only a leadership loss BEFORE the append is NotLeader (safe for the submitter to re-resolve the leader and
+    /// resend). Anything else, including a NotLeaderException raised after the append and hitting the deadline,
+    /// may already sit in the log, so only the submitter's local apply can tell whether it committed. Detail
+    /// stays local rather than leaking to the caller.
+    /// </summary>
+    internal static (byte Status, string? Message) ForwardedReplicateFailure(Exception ex) => IsNotLeaderBeforeAppend(ex)
+        ? (ForwardingProtocol.StatusNotLeader, null)
+        : (ForwardingProtocol.StatusAmbiguous, "outcome unknown");
 
     /// <summary>
     /// Leader-only periodic cleanup. Every node runs the loop, but only the current leader submits, so
