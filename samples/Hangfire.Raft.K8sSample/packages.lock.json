@@ -13,44 +13,44 @@
       },
       "DotNext": {
         "type": "Transitive",
-        "resolved": "6.11.1",
-        "contentHash": "ALxxxTUDB7wYCqof4MpMSUwgMdqaTR9cPWfum5m3KTgAqKgUo5MVQAZWBszS9AuJLSM6TVV97pkFcNkyFNSfxQ==",
+        "resolved": "6.12.2",
+        "contentHash": "DPM4A+r7oaU5h+chGBTel+fNfd/bosYHPTdIM8NxBJQHS5V6dnuqZrElhV70xbzz+DjBDxfVp9nIfIxPnqS8Zw==",
         "dependencies": {
-          "System.IO.Hashing": "10.0.13"
+          "System.IO.Hashing": "10.0.14"
         }
       },
       "DotNext.IO": {
         "type": "Transitive",
-        "resolved": "6.11.1",
-        "contentHash": "OYIynnufDtmMS6zu+iyIYWVtbrTQOrW79Oy8GlMTELrNjPCmyEv/qiqSQX68qG2Wd9ei2j2va7VBERRut0kJxw==",
+        "resolved": "6.12.2",
+        "contentHash": "gn49nh8Uvffzcr2PX+oPjDXogd422y+9td0KtA+yyJVr+o68GHirtVXK71xPch4S7chWNfhZRcRjFIJD2aXLEg==",
         "dependencies": {
-          "DotNext": "6.11.1"
+          "DotNext": "6.12.2"
         }
       },
       "DotNext.Net.Cluster": {
         "type": "Transitive",
-        "resolved": "6.11.1",
-        "contentHash": "1zcFDI3GNB9/FZN02tQAlJr6lOUDjlD3O3o0xdtETsuS3Ja6s87yQOFFk5fcDepw3/aFtFLcEA5+iUUO3JVTtw==",
+        "resolved": "6.12.2",
+        "contentHash": "mTvYWeOlbI2YNmcAi821dSFkKjLb2lkCvU2XoVP12+ZEHOovkFUGpSfsf/eMfwRFTbFn3/aoSqDXUZACeKd2ug==",
         "dependencies": {
-          "DotNext.IO": "6.11.1",
-          "DotNext.Threading": "6.11.1",
-          "DotNext.Unsafe": "6.11.1"
+          "DotNext.IO": "6.12.2",
+          "DotNext.Threading": "6.12.2",
+          "DotNext.Unsafe": "6.12.2"
         }
       },
       "DotNext.Threading": {
         "type": "Transitive",
-        "resolved": "6.11.1",
-        "contentHash": "0wv/aySI9MnAKW61JGqvRGEiU7jAniBD0gcm2Vz8mpeQRUhngMhvbMtD2MotXntuUaWLb6Q3Z+9ZDyA1ru97oQ==",
+        "resolved": "6.12.2",
+        "contentHash": "Mp5X6BMY8h/S0e57dbbqLX6onpB5pF7lpVnXgvG48yr3JGl+JNH3a/veO+BTJYYUE3OsQHMaJMFQ0+s88/OVkg==",
         "dependencies": {
-          "DotNext": "6.11.1"
+          "DotNext": "6.12.2"
         }
       },
       "DotNext.Unsafe": {
         "type": "Transitive",
-        "resolved": "6.11.1",
-        "contentHash": "JMaKNZyRmesnGK9iAOmVFhWkjbQY5+iksIMrjv2TUCVeOtXXeRVF5YIWpi3+FLy+al8thjb+tDpKwI0VT4ECtw==",
+        "resolved": "6.12.2",
+        "contentHash": "+h1pdk7U0N/zMMYqovBatOph2Q7XX+vWIneM1foPVBL1r+a/pwAmXpGw1oPuPjvGqEi0iCUpAm96EHhNXRXkrg==",
         "dependencies": {
-          "DotNext": "6.11.1"
+          "DotNext": "6.12.2"
         }
       },
       "Hangfire.Core": {
@@ -76,13 +76,13 @@
       },
       "System.IO.Hashing": {
         "type": "Transitive",
-        "resolved": "10.0.13",
-        "contentHash": "ZlcywyQ7FJmgOV2nctdfOEPGS0kRK8T2CdOoPr6F4HPYpmjSo6GQfj3yTyOzNO6B+2U84/JKSPkJJMWqLmVsMw=="
+        "resolved": "10.0.14",
+        "contentHash": "lVqovhCt3HlZe7ONG5ydaj6BYwYI004gldVfMMkJl/lR5ueeCtWNpW4nejOX75sPmzm8vXCxB69GqwHaYCnyUQ=="
       },
       "Hangfire.Community.Raft": {
         "type": "Project",
         "dependencies": {
-          "DotNext.Net.Cluster": "[6.11.1, )",
+          "DotNext.Net.Cluster": "[6.12.2, )",
           "Hangfire.Core": "[1.8.*, )"
         }
       }
